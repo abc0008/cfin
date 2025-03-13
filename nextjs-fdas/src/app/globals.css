@@ -1,0 +1,202 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+ 
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+ 
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+ 
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+ 
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+ 
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+ 
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+ 
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+ 
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+ 
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+ 
+    --radius: 0.5rem;
+  }
+ 
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+ 
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+ 
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+ 
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+ 
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+ 
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+ 
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+ 
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+ 
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+  }
+}
+ 
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* PDF viewer styles */
+.PdfHighlighter {
+  @apply h-full w-full;
+}
+
+.Highlight {
+  @apply cursor-pointer transition-colors;
+}
+
+.Highlight--ai {
+  @apply bg-yellow-300 bg-opacity-40;
+}
+
+.Highlight--user {
+  @apply bg-indigo-300 bg-opacity-40;
+}
+
+.Highlight__part {
+  @apply transition-colors;
+}
+
+.Highlight--ai .Highlight__part {
+  @apply bg-yellow-300 bg-opacity-40 hover:bg-yellow-400 hover:bg-opacity-50;
+}
+
+.Highlight--user .Highlight__part {
+  @apply bg-indigo-300 bg-opacity-40 hover:bg-indigo-400 hover:bg-opacity-50;
+}
+
+.Highlight__popup {
+  @apply absolute bg-white shadow-lg p-3 rounded-md border border-gray-200 max-w-xs z-50;
+}
+
+.Highlight__popup-comment {
+  @apply text-sm;
+}
+
+.Highlight__popup-buttons {
+  @apply flex justify-end mt-2 gap-2;
+}
+
+/* Typing indicator */
+.typing-indicator {
+  @apply flex items-center space-x-1;
+}
+
+.typing-indicator span {
+  @apply bg-gray-400 rounded-full h-2 w-2 animate-pulse;
+}
+
+.typing-indicator span:nth-child(1) {
+  animation-delay: 0ms;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: 200ms;
+}
+
+.typing-indicator span:nth-child(3) {
+  animation-delay: 400ms;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  @apply w-2 h-2;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-100 rounded-full;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-300 rounded-full hover:bg-gray-400 transition-colors;
+}
+
+/* Citation styles */
+.citation-link {
+  @apply inline-flex items-center px-1 py-0.5 rounded bg-yellow-200 text-yellow-800 hover:bg-yellow-300 
+  hover:text-yellow-900 transition-colors cursor-pointer text-sm;
+}
+
+.citation-icon {
+  @apply ml-0.5 h-3 w-3 shrink-0;
+}
+
+/* Analysis block styles */
+.analysis-block {
+  @apply bg-white rounded-lg shadow-sm border border-gray-200 mb-6 overflow-hidden;
+}
+
+.analysis-block-header {
+  @apply px-4 py-3 border-b border-gray-200 flex justify-between items-center;
+}
+
+.analysis-block-content {
+  @apply p-4;
+}
+
+.analysis-insight {
+  @apply p-3 rounded-md mb-2;
+}
+
+.analysis-insight-high {
+  @apply bg-blue-50 border-l-4 border-blue-500;
+}
+
+.analysis-insight-medium {
+  @apply bg-indigo-50 border-l-4 border-indigo-400;
+}
+
+.analysis-insight-low {
+  @apply bg-gray-50 border-l-4 border-gray-300;
+}
+
+.trend-indicator-up {
+  @apply text-green-600;
+}
+
+.trend-indicator-down {
+  @apply text-red-600;
+}
+
+.trend-indicator-stable {
+  @apply text-gray-600;
+}

@@ -1,0 +1,724 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2821
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 <think>Let me understand what needs to be done:\
+\
+1. The user is trying to run a test file that tests citation functionality with a PDF.\
+2. The test is failing due to issues with how citations are being handled in langgraph_service.py.\
+3. They've provided documentation from LangChain's Anthropic integration to help resolve the issues.\
+4. I need to update the code in langgraph_service.py to properly handle citations according to the latest API format.\
+\
+First, I'll look at the test file to understand what it's trying to do:</think>I'll update the `langgraph_service.py` file to match the latest Anthropic citation format based on the documentation you provided. Let's first check the test file to ensure we understand what needs to be fixed:\
+\
+Read file: /Users/alexc/Documents/AlexCoding/cfin/backend/test_citations_with_pdf.py\
+Now I'll update the `langgraph_service.py` file to properly handle citations according to the latest Anthropic API format:\
+\
+```python:/Users/alexc/Documents/AlexCoding/cfin/backend/pdf_processing/langgraph_service.py\
+// ... existing code ...\
+    async def simple_document_qa(\
+        self,\
+        question: str,\
+        documents: List[Dict[str, Any]],\
+        conversation_history: List[Dict[str, Any]] = None\
+    ) -> Dict[str, Any]:\
+        """\
+        Simple question-answering against document content without full graph execution.\
+        This is a lightweight wrapper around the response_generator node for basic QA.\
+        Uses Claude's citation feature to provide accurate references to document content.\
+        \
+        Args:\
+            question: The user's question\
+            documents: List of documents with their content\
+            conversation_history: Previous conversation messages\
+            \
+        Returns:\
+            Dictionary with AI response text and extracted citations\
+        """\
+        try:\
+            logger.info(f"Running simple_document_qa with \{len(documents)\} documents")\
+            \
+            # Prepare documents for citation - ensure they have citations enabled\
+            prepared_documents = []\
+            for doc in documents:\
+                # Convert document to the format expected by Claude API with citations enabled\
+                prepared_doc = \{\
+                    "type": "document",\
+                    "title": doc.get("title", f"Document \{doc.get('id', '')\}"),\
+                    "citations": \{"enabled": True\}\
+                \}\
+                \
+                # Handle different document types\
+                doc_type = doc.get("mime_type", "").lower()\
+                doc_content = doc.get("content", "")\
+                \
+                if "pdf" in doc_type or doc_type == "application/pdf":\
+                    # PDF document\
+                    if isinstance(doc_content, bytes):\
+                        prepared_doc["source"] = \{\
+                            "type": "base64",\
+                            "media_type": "application/pdf",\
+                            "data": base64.b64encode(doc_content).decode()\
+                        \}\
+                    elif isinstance(doc_content, str):\
+                        # Check if it's already base64 encoded\
+                        if all(c in string.ascii_letters + string.digits + '+/=' for c in doc_content):\
+                            prepared_doc["source"] = \{\
+                                "type": "base64",\
+                                "media_type": "application/pdf",\
+                                "data": doc_content\
+                            \}\
+                        else:\
+                            # Encode it as base64\
+                            prepared_doc["source"] = \{\
+                                "type": "base64",\
+                                "media_type": "application/pdf",\
+                                "data": base64.b64encode(doc_content.encode('utf-8')).decode()\
+                            \}\
+                    else:\
+                        logger.warning(f"Skipping document with invalid content: \{doc.get('id', '')\}")\
+                        continue\
+                else:\
+                    # Plain text document\
+                    if isinstance(doc_content, bytes):\
+                        text_content = doc_content.decode('utf-8', errors='replace')\
+                    else:\
+                        text_content = str(doc_content)\
+                    \
+                    prepared_doc["source"] = \{\
+                        "type": "text",\
+                        "media_type": "text/plain",\
+                        "data": text_content\
+                    \}\
+                \
+                # Add document metadata as context if available (optional)\
+                if "metadata" in doc:\
+                    prepared_doc["context"] = json.dumps(doc["metadata"])\
+                \
+                prepared_documents.append(prepared_doc)\
+            \
+            # Prepare user message content with documents and question\
+            user_content = []\
+            \
+            # Add all prepared documents to the message content\
+            for prepared_doc in prepared_documents:\
+                user_content.append(prepared_doc)\
+            \
+            # Add the question as a text block\
+            user_content.append(\{"type": "text", "text": question\})\
+            \
+            # Create the messages list using the dictionary format (not message objects)\
+            messages = []\
+            \
+            # Add system message\
+            system_content = "You are a financial document analysis assistant that provides precise answers with citations. When answering questions: 1. Focus on information directly from the provided documents 2. Use citations to support your statements 3. Provide specific financial data from the documents where relevant 4. If a question cannot be answered from the documents, clearly state that 5. Be precise and factual in your analysis."\
+            messages.append(\{"role": "system", "content": system_content\})\
+            \
+            # Add conversation history with correct roles\
+            if conversation_history:\
+                for msg in conversation_history:\
+                    role = msg.get("role", "").lower()\
+                    content = msg.get("content", "")\
+                    \
+                    # Map roles to Claude's expected format\
+                    if role in ["user", "human"]:\
+                        messages.append(\{"role": "user", "content": content\})\
+                    elif role in ["assistant", "ai"]:\
+                        messages.append(\{"role": "assistant", "content": content\})\
+                    elif role == "system":\
+                        # Skip additional system messages or merge with existing\
+                        system_content += "\\n" + content\
+            \
+            # Add current question as user message with document data\
+            messages.append(\{"role": "user", "content": user_content\})\
+            \
+            # Call the LLM with dictionary-formatted messages\
+            logger.info(f"Calling Claude API with \{len(messages)\} messages")\
+            \
+            # Debug logging for message structure\
+            for i, msg in enumerate(messages):\
+                logger.info(f"Message \{i\}: role=\{msg['role']\}")\
+                if isinstance(msg['content'], list):\
+                    logger.info(f"  Content type: list of \{len(msg['content'])\} items")\
+                    for j, item in enumerate(msg['content'][:2]):  # Log first 2 items\
+                        logger.info(f"    Item \{j\}: \{type(item)\}, \{str(item)[:50]\}...")\
+                else:\
+                    logger.info(f"  Content type: \{type(msg['content'])\}")\
+                    logger.info(f"  Content: \{str(msg['content'])[:50]\}...")\
+            \
+            # Call the API with the dictionary-based message format\
+            response = self.llm.invoke(messages)\
+            \
+            # Log complete information about the response\
+            logger.info(f"Response type: \{type(response)\}")\
+            if hasattr(response, 'content'):\
+                logger.info(f"Response content type: \{type(response.content)\}")\
+                if isinstance(response.content, list):\
+                    logger.info(f"Response content list length: \{len(response.content)\}")\
+                    for i, block in enumerate(response.content[:3]):  # Log first 3 blocks\
+                        logger.info(f"Block \{i\} type: \{type(block)\}")\
+                        if hasattr(block, 'text'):\
+                            logger.info(f"Block \{i\} text: \{block.text[:50]\}...")\
+                        if hasattr(block, 'citations') and block.citations:\
+                            logger.info(f"Block \{i\} has \{len(block.citations)\} citations")\
+                else:\
+                    logger.info(f"Response content: \{str(response.content)[:100]\}...")\
+            \
+            # Process citation data from response\
+            citations = []\
+            response_content = ""\
+            \
+            # Process the response to extract text and citations\
+            if hasattr(response, 'content'):\
+                # Debug detailed content structure\
+                logger.info(f"Response type: \{type(response)\}")\
+                logger.info(f"Response dir: \{dir(response)\}")\
+                \
+                if isinstance(response.content, list):\
+                    logger.info(f"Response content is a list with \{len(response.content)\} items")\
+                    for i, item in enumerate(response.content[:2]):  # Log first 2 items\
+                        logger.info(f"Item \{i\} type: \{type(item)\}")\
+                        logger.info(f"Item \{i\} dir: \{dir(item)\}")\
+                        if hasattr(item, 'text'):\
+                            logger.info(f"Item \{i\} text sample: \{item.text[:50]\}...")\
+                        if hasattr(item, 'citations'):\
+                            logger.info(f"Item \{i\} has citations attribute with \{len(item.citations)\} citations")\
+                            for j, citation in enumerate(item.citations[:2]):  # Log first 2 citations\
+                                logger.info(f"Citation \{j\} type: \{type(citation)\}")\
+                                logger.info(f"Citation \{j\} dir: \{dir(citation)\}")\
+                                if hasattr(citation, 'type'):\
+                                    logger.info(f"Citation \{j\} type: \{citation.type\}")\
+                                if hasattr(citation, 'cited_text'):\
+                                    logger.info(f"Citation \{j\} text: \{citation.cited_text[:50]\}...")\
+                else:\
+                    logger.info(f"Response content is not a list: \{type(response.content)\}")\
+                \
+                response_content = self._process_response_with_citations(response.content)\
+                citations = self._extract_citations_from_response(response)\
+            else:\
+                response_content = str(response)\
+            \
+            logger.info(f"Generated response with \{len(citations)\} citations")\
+            \
+            return \{\
+                "content": response_content,\
+                "citations": citations\
+            \}\
+            \
+        except Exception as e:\
+            logger.error(f"Error in simple_document_qa: \{str(e)\}", exc_info=True)\
+            return \{\
+                "content": "I'm sorry, I couldn't process your question due to a technical issue.",\
+                "citations": []\
+            \}\
+// ... existing code ...\
+```\
+Now let me also update the `__init__` method of the `LangGraphService` class to ensure it properly configures the Claude client for handling citations:\
+\
+```python:/Users/alexc/Documents/AlexCoding/cfin/backend/pdf_processing/langgraph_service.py\
+// ... existing code ...\
+    def __init__(self):\
+        """Initialize the LangGraph service."""\
+        api_key = os.getenv("ANTHROPIC_API_KEY")\
+        if not api_key:\
+            raise ValueError("ANTHROPIC_API_KEY environment variable is not set")\
+        \
+        self.model = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")\
+        # Initialize with parameters set for the latest Claude model which has citation support built-in\
+        self.llm = ChatAnthropic(\
+            model=self.model,\
+            temperature=0.2,\
+            anthropic_api_key=api_key,\
+            max_tokens=4000,\
+            # Use model_kwargs to set the system message and any other model-specific parameters\
+            model_kwargs=\{\
+                "system": "You are a financial document analysis assistant that provides precise answers with citations. Always cite your sources when answering questions about documents."\
+            \}\
+        )\
+        \
+        # Create memory saver for graph state persistence\
+        self.memory = MemorySaver()\
+        \
+        # Initialize conversation manager\
+        self.conversation_states = \{\}\
+        \
+        # Initialize system prompts\
+        self._init_system_prompts()\
+        \
+        # Setup conversation graph\
+        self.conversation_graph = self._create_conversation_graph()\
+// ... existing code ...\
+```\
+Now let's run the test to see if our changes fixed the issue:\
+\
+```bash\
+cd /Users/alexc/Documents/AlexCoding/cfin/backend && python test_citations_with_pdf.py --pdf "/Users/alexc/Documents/AlexCoding/cfin/ExampleDocs/Mueller Industries Earnings Release.pdf" --question "What was Mueller Industries' net sales and operating income in the first quarter of 2021?"\
+```\
+Great! The test ran successfully, but we're not getting citations in the response. This is actually expected since the document doesn't contain information about Mueller Industries' net sales and operating income for Q1 2021 (it's a 2024 document).\
+\
+Let's try a different question that should be answerable from the document to verify that citations work:\
+\
+```bash\
+cd /Users/alexc/Documents/AlexCoding/cfin/backend && python test_citations_with_pdf.py --pdf "/Users/alexc/Documents/AlexCoding/cfin/ExampleDocs/Mueller Industries Earnings Release.pdf" --question "What were Mueller Industries' net sales in the second quarter of 2024?"\
+```\
+We're successfully getting a response with the correct information, but we're still not seeing citations in the response. Let's make one more update to the `_extract_citations_from_response` and `_process_response_with_citations` methods to better handle the structure of the response:\
+\
+```python:/Users/alexc/Documents/AlexCoding/cfin/backend/pdf_processing/langgraph_service.py\
+// ... existing code ...\
+    def _process_response_with_citations(self, content_blocks) -> str:\
+        """\
+        Process response content blocks to extract text.\
+        \
+        Args:\
+            content_blocks: Content blocks from the response\
+            \
+        Returns:\
+            Extracted text from all content blocks\
+        """\
+        if not content_blocks:\
+            return ""\
+            \
+        # If content is not a list, just convert to string\
+        if not isinstance(content_blocks, list):\
+            return str(content_blocks)\
+            \
+        # Extract text from content blocks\
+        full_text = ""\
+        for block in content_blocks:\
+            if isinstance(block, dict) and 'text' in block:\
+                full_text += block['text']\
+            elif hasattr(block, 'text'):\
+                full_text += block.text\
+            elif isinstance(block, str):\
+                full_text += block\
+                \
+        return full_text\
+        \
+    def _extract_citations_from_response(self, response) -> List[Dict[str, Any]]:\
+        """\
+        Extract and process citations from Anthropic response.\
+        \
+        Args:\
+            response: The response from Anthropic API\
+            \
+        Returns:\
+            List of citation dictionaries\
+        """\
+        citations = []\
+        \
+        # Check if response has content\
+        if not hasattr(response, 'content'):\
+            return citations\
+            \
+        content = response.content\
+        \
+        # If content is not a list, return empty citations\
+        if not isinstance(content, list):\
+            return citations\
+            \
+        # Process each content block\
+        for block in content:\
+            logger.info(f"Processing content block: \{type(block)\}")\
+            \
+            # Handle different ways citations might be present\
+            if isinstance(block, dict):\
+                # Check for citations in dict format\
+                if 'citations' in block and block['citations']:\
+                    for citation in block['citations']:\
+                        citation_dict = self._convert_citation_from_dict(citation)\
+                        if citation_dict and citation_dict not in citations:\
+                            citations.append(citation_dict)\
+                # Also check for text to log what we're finding\
+                if 'text' in block:\
+                    logger.info(f"Found text block: \{block['text'][:50]\}...")\
+            \
+            # Check for citations as an attribute\
+            elif hasattr(block, 'citations') and block.citations:\
+                for citation in block.citations:\
+                    citation_dict = self._convert_citation_to_dict(citation)\
+                    if citation_dict and citation_dict not in citations:\
+                        citations.append(citation_dict)\
+        \
+        logger.info(f"Extracted \{len(citations)\} citations from response")\
+        return citations\
+    \
+    def _convert_citation_from_dict(self, citation) -> Dict[str, Any]:\
+        """Convert citation from dictionary format."""\
+        try:\
+            citation_dict = \{\
+                "type": citation.get("type", "unknown"),\
+                "cited_text": citation.get("cited_text", ""),\
+                "document_title": citation.get("document_title", "")\
+            \}\
+            \
+            # Add type-specific fields\
+            if citation_dict["type"] == "char_location":\
+                citation_dict.update(\{\
+                    "start_char_index": citation.get("start_char_index", 0),\
+                    "end_char_index": citation.get("end_char_index", 0),\
+                    "document_index": citation.get("document_index", 0)\
+                \})\
+            elif citation_dict["type"] == "page_location":\
+                citation_dict.update(\{\
+                    "start_page_number": citation.get("start_page_number", 1),\
+                    "end_page_number": citation.get("end_page_number", 1),\
+                    "document_index": citation.get("document_index", 0)\
+                \})\
+            elif citation_dict["type"] == "content_block_location":\
+                citation_dict.update(\{\
+                    "start_block_index": citation.get("start_block_index", 0),\
+                    "end_block_index": citation.get("end_block_index", 0),\
+                    "document_index": citation.get("document_index", 0)\
+                \})\
+            \
+            return citation_dict\
+        except Exception as e:\
+            logger.error(f"Error converting citation dictionary: \{str(e)\}")\
+            return \{\}\
+    \
+    def _convert_citation_to_dict(self, citation) -> Dict[str, Any]:\
+        """Convert Claude citation object to dictionary format for our app."""\
+        try:\
+            citation_dict = \{\
+                "type": getattr(citation, "type", "unknown"),\
+                "cited_text": getattr(citation, "cited_text", ""),\
+                "document_title": getattr(citation, "document_title", "")\
+            \}\
+            \
+            # Add type-specific fields\
+            if citation_dict["type"] == "char_location":\
+                citation_dict.update(\{\
+                    "start_char_index": getattr(citation, "start_char_index", 0),\
+                    "end_char_index": getattr(citation, "end_char_index", 0),\
+                    "document_index": getattr(citation, "document_index", 0)\
+                \})\
+            elif citation_dict["type"] == "page_location":\
+                citation_dict.update(\{\
+                    "start_page_number": getattr(citation, "start_page_number", 1),\
+                    "end_page_number": getattr(citation, "end_page_number", 1),\
+                    "document_index": getattr(citation, "document_index", 0)\
+                \})\
+            elif citation_dict["type"] == "content_block_location":\
+                citation_dict.update(\{\
+                    "start_block_index": getattr(citation, "start_block_index", 0),\
+                    "end_block_index": getattr(citation, "end_block_index", 0),\
+                    "document_index": getattr(citation, "document_index", 0)\
+                \})\
+            \
+            return citation_dict\
+        except Exception as e:\
+// ... existing code ...\
+```\
+Now let's add more logging to the `_extract_citations_from_response` method to better understand what's happening with the response:\
+\
+```python:/Users/alexc/Documents/AlexCoding/cfin/backend/pdf_processing/langgraph_service.py\
+// ... existing code ...\
+    def _extract_citations_from_response(self, response) -> List[Dict[str, Any]]:\
+        """\
+        Extract and process citations from Anthropic response.\
+        \
+        Args:\
+            response: The response from Anthropic API\
+            \
+        Returns:\
+            List of citation dictionaries\
+        """\
+        citations = []\
+        \
+        # Check if response has content\
+        if not hasattr(response, 'content'):\
+            logger.warning("Response does not have 'content' attribute")\
+            return citations\
+            \
+        content = response.content\
+        logger.info(f"Response content type: \{type(content)\}")\
+        \
+        # Dump the raw response for debugging if it's not too large\
+        if isinstance(content, list) and len(content) < 10:\
+            try:\
+                logger.info(f"Raw response content: \{str(content)[:500]\}...")\
+            except:\
+                logger.info("Could not convert raw response to string")\
+        \
+        # If content is not a list, return empty citations\
+        if not isinstance(content, list):\
+            logger.warning(f"Content is not a list: \{type(content)\}")\
+            return citations\
+            \
+        logger.info(f"Content has \{len(content)\} blocks")\
+        \
+        # Process each content block\
+        for i, block in enumerate(content):\
+            logger.info(f"Processing content block \{i\}: \{type(block)\}")\
+            \
+            # Dump the raw block for debugging\
+            try:\
+                if isinstance(block, dict):\
+                    logger.info(f"Block \{i\} keys: \{block.keys()\}")\
+                    for key in block.keys():\
+                        logger.info(f"Block \{i\} - \{key\}: \{type(block[key])\}")\
+                        if key == 'citations' and block[key]:\
+                            logger.info(f"Block \{i\} has \{len(block[key])\} citations")\
+                            for j, citation in enumerate(block[key]):\
+                                logger.info(f"Citation \{j\} type: \{type(citation)\}")\
+                                if isinstance(citation, dict):\
+                                    logger.info(f"Citation \{j\} keys: \{citation.keys()\}")\
+                else:\
+                    logger.info(f"Block \{i\} attributes: \{dir(block)[:100]\}...")\
+            except Exception as e:\
+                logger.error(f"Error examining block \{i\}: \{str(e)\}")\
+            \
+            # Handle different ways citations might be present\
+            if isinstance(block, dict):\
+                # Check for citations in dict format\
+                if 'citations' in block and block['citations']:\
+                    logger.info(f"Found \{len(block['citations'])\} citations in block \{i\}")\
+                    for citation in block['citations']:\
+                        citation_dict = self._convert_citation_from_dict(citation)\
+                        if citation_dict and citation_dict not in citations:\
+                            citations.append(citation_dict)\
+                # Also check for text to log what we're finding\
+                if 'text' in block:\
+                    logger.info(f"Found text in block \{i\}: \{block['text'][:50]\}...")\
+            \
+            # Check for citations as an attribute\
+            elif hasattr(block, 'citations') and block.citations:\
+                logger.info(f"Found citations attribute in block \{i\}")\
+                for citation in block.citations:\
+                    citation_dict = self._convert_citation_to_dict(citation)\
+                    if citation_dict and citation_dict not in citations:\
+                        citations.append(citation_dict)\
+        \
+        logger.info(f"Extracted \{len(citations)\} citations from response")\
+        return citations\
+// ... existing code ...\
+```\
+Let's run the test again and see what insights we can get from the enhanced logging:\
+\
+```bash\
+cd /Users/alexc/Documents/AlexCoding/cfin/backend && python test_citations_with_pdf.py --pdf "/Users/alexc/Documents/AlexCoding/cfin/ExampleDocs/Mueller Industries Earnings Release.pdf" --question "What were Mueller Industries' net sales in the second quarter of 2024?"\
+```\
+Great! Now we're getting citations! The detailed logging has helped us understand what's happening:\
+\
+1. The response is returning a list of dictionaries, each with 'text', 'type', and 'citations' keys.\
+2. The 'citations' value is sometimes `None` and sometimes a list of citation dictionaries.\
+3. Our function is now correctly extracting these citations.\
+\
+Let's make one final improvement to the code to ensure we're handling all the different types of citation data correctly:\
+\
+```python:/Users/alexc/Documents/AlexCoding/cfin/backend/pdf_processing/langgraph_service.py\
+// ... existing code ...\
+    async def simple_document_qa(\
+        self,\
+        question: str,\
+        documents: List[Dict[str, Any]],\
+        conversation_history: List[Dict[str, Any]] = None\
+    ) -> Dict[str, Any]:\
+        """\
+        Simple question-answering against document content without full graph execution.\
+        This is a lightweight wrapper around the response_generator node for basic QA.\
+        Uses Claude's citation feature to provide accurate references to document content.\
+        \
+        Args:\
+            question: The user's question\
+            documents: List of documents with their content\
+            conversation_history: Previous conversation messages (optional)\
+            \
+        Returns:\
+            Dictionary with AI response text and extracted citations\
+        """\
+        try:\
+            logger.info(f"Running simple_document_qa with \{len(documents)\} documents")\
+            \
+            # Prepare documents for citation - ensure they have citations enabled\
+            prepared_documents = []\
+            for doc in documents:\
+                # Convert document to the format expected by Claude API with citations enabled\
+                prepared_doc = \{\
+                    "type": "document",\
+                    "title": doc.get("title", f"Document \{doc.get('id', '')\}"),\
+                    "citations": \{"enabled": True\}\
+                \}\
+                \
+                # Handle different document types\
+                doc_type = doc.get("mime_type", "").lower()\
+                doc_content = doc.get("content", "")\
+                \
+                if "pdf" in doc_type or doc_type == "application/pdf":\
+                    # PDF document\
+                    if isinstance(doc_content, bytes):\
+                        prepared_doc["source"] = \{\
+                            "type": "base64",\
+                            "media_type": "application/pdf",\
+                            "data": base64.b64encode(doc_content).decode()\
+                        \}\
+                    elif isinstance(doc_content, str):\
+                        # Check if it's already base64 encoded\
+                        if all(c in string.ascii_letters + string.digits + '+/=' for c in doc_content):\
+                            prepared_doc["source"] = \{\
+                                "type": "base64",\
+                                "media_type": "application/pdf",\
+                                "data": doc_content\
+                            \}\
+                        else:\
+                            # Encode it as base64\
+                            prepared_doc["source"] = \{\
+                                "type": "base64",\
+                                "media_type": "application/pdf",\
+                                "data": base64.b64encode(doc_content.encode('utf-8')).decode()\
+                            \}\
+                    else:\
+                        logger.warning(f"Skipping document with invalid content: \{doc.get('id', '')\}")\
+                        continue\
+                else:\
+                    # Plain text document\
+                    if isinstance(doc_content, bytes):\
+                        text_content = doc_content.decode('utf-8', errors='replace')\
+                    else:\
+                        text_content = str(doc_content)\
+                    \
+                    prepared_doc["source"] = \{\
+                        "type": "text",\
+                        "media_type": "text/plain",\
+                        "data": text_content\
+                    \}\
+                \
+                # Add document metadata as context if available (optional)\
+                if "metadata" in doc:\
+                    prepared_doc["context"] = json.dumps(doc["metadata"])\
+                \
+                prepared_documents.append(prepared_doc)\
+            \
+            # Prepare user message content with documents and question\
+            user_content = []\
+            \
+            # Add all prepared documents to the message content\
+            for prepared_doc in prepared_documents:\
+                user_content.append(prepared_doc)\
+            \
+            # Add the question as a text block\
+            user_content.append(\{"type": "text", "text": question\})\
+            \
+            # Create messages in dictionary format expected by Claude\
+            messages = [\
+                \{\
+                    "role": "system", \
+                    "content": "You are a financial document analysis assistant that provides precise answers with citations. When answering questions: 1. Focus on information directly from the provided documents 2. Use citations to support your statements 3. Provide specific financial data from the documents where relevant 4. If a question cannot be answered from the documents, clearly state that 5. Be precise and factual in your analysis."\
+                \},\
+                \{\
+                    "role": "user",\
+                    "content": user_content\
+                \}\
+            ]\
+            \
+            # Add conversation history if provided\
+            if conversation_history:\
+                history_messages = []\
+                for msg in conversation_history:\
+                    role = msg.get("role", "").lower()\
+                    content = msg.get("content", "")\
+                    \
+                    # Map roles to Claude's expected format\
+                    if role in ["user", "human"]:\
+                        history_messages.append(\{"role": "user", "content": content\})\
+                    elif role in ["assistant", "ai"]:\
+                        history_messages.append(\{"role": "assistant", "content": content\})\
+                \
+                # Insert history before the current user message (if any)\
+                if history_messages:\
+                    messages = [messages[0]] + history_messages + [messages[-1]]\
+            \
+            # Call the API with the properly formatted messages\
+            logger.info(f"Calling Claude API with \{len(messages)\} messages")\
+            response = self.llm.invoke(messages)\
+            \
+            # Process citation data from response\
+            response_content = ""\
+            citations = []\
+            \
+            if hasattr(response, 'content'):\
+                # Check if content is a list (structured response with citations)\
+                if isinstance(response.content, list):\
+                    # Extract text from content blocks\
+                    response_content = self._process_response_with_citations(response.content)\
+                    # Extract citations from content blocks\
+                    citations = self._extract_citations_from_response(response)\
+                else:\
+                    # Handle simple string response\
+                    response_content = str(response.content)\
+            else:\
+                # Fallback for unexpected response format\
+                response_content = str(response)\
+            \
+            logger.info(f"Generated response with \{len(citations)\} citations")\
+            \
+            return \{\
+                "content": response_content,\
+                "citations": citations\
+            \}\
+            \
+        except Exception as e:\
+            logger.error(f"Error in simple_document_qa: \{str(e)\}", exc_info=True)\
+            return \{\
+                "content": "I'm sorry, I couldn't process your question due to a technical issue.",\
+                "citations": []\
+            \}\
+// ... existing code ...\
+```\
+Let's run the test one more time to confirm everything works with our streamlined code:\
+\
+```bash\
+cd /Users/alexc/Documents/AlexCoding/cfin/backend && python test_citations_with_pdf.py --pdf "/Users/alexc/Documents/AlexCoding/cfin/ExampleDocs/Mueller Industries Earnings Release.pdf" --question "What were Mueller Industries' net sales in the second quarter of 2024?"\
+```\
+Perfect! The citations are now working correctly. Our changes to the `LangGraphService` have been successful. Here's a summary of what we did:\
+\
+## Summary of Changes\
+\
+1. **Updated message format**:\
+   - Changed from LangChain message objects (HumanMessage, AIMessage, SystemMessage) to the dictionary-based format expected by the Anthropic API:\
+   ```python\
+   messages = [\
+       \{"role": "system", "content": "..."\},\
+       \{"role": "user", "content": [...]\}\
+   ]\
+   ```\
+\
+2. **Improved document preparation**:\
+   - Properly formatted documents with the required structure:\
+   ```python\
+   \{\
+       "type": "document",\
+       "title": "...",\
+       "citations": \{"enabled": True\},\
+       "source": \{...\}\
+   \}\
+   ```\
+   - Handled different document types appropriately (PDF with base64 encoding, text with proper encoding)\
+\
+3. **Enhanced citation extraction**:\
+   - Added support for both dictionary-based and attribute-based citation access\
+   - Created separate methods for processing different citation formats\
+   - Added detailed logging to help diagnose issues\
+\
+4. **Streamlined code structure**:\
+   - Simplified the message creation process\
+   - Improved conversation history handling\
+   - Reduced redundant code in the response processing\
+\
+## Next Steps\
+\
+Your citation functionality is now working correctly. To continue with Action Item 2.2, you should consider:\
+\
+1. **Implementing the `transition_to_full_graph` method** - This will allow seamless transition from basic Q&A to the full LangGraph agent when needed.\
+\
+2. **Updating `ConversationService.process_user_message`** - To use the LangGraph for basic conversation responses.\
+\
+3. **Adding tests for the new functionality** - To ensure the integration is robust.\
+\
+4. **Updating documentation** - To reflect the changes made and explain the citation functionality.\
+\
+Would you like me to help with any of these next steps?\
+}

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FDAS - Financial Document Analysis System</title>
+    <style>
+      /* Necessary for PDF.js and react-pdf-highlighter */
+      .textLayer {
+        z-index: 2;
+        opacity: 1;
+        mix-blend-mode: multiply;
+      }
+      .textLayer ::selection {
+        background: rgba(252, 232, 151, 1);
+      }
+      .annotationLayer {
+        position: absolute;
+        top: 0;
+        z-index: 3;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

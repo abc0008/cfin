@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Document Upload Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .container {
+      border: 1px solid #ddd;
+      padding: 20px;
+      border-radius: 5px;
+      margin-bottom: 20px;
+    }
+    h1, h2 {
+      color: #333;
+    }
+    button {
+      background-color: #4CAF50;
+      color: white;
+      padding: 10px 15px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+    button:hover {
+      background-color: #45a049;
+    }
+    input[type="file"] {
+      margin: 10px 0;
+    }
+    pre {
+      background-color: #f5f5f5;
+      padding: 10px;
+      border-radius: 5px;
+      overflow: auto;
+      max-height: 300px;
+    }
+    .success {
+      color: green;
+      font-weight: bold;
+    }
+    .error {
+      color: red;
+      font-weight: bold;
+    }
+    #documentList {
+      list-style-type: none;
+      padding: 0;
+    }
+    #documentList li {
+      padding: 10px;
+      border-bottom: 1px solid #eee;
+    }
+    #documentList li:hover {
+      background-color: #f9f9f9;
+    }
+    .document-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .document-actions {
+      display: flex;
+      gap: 10px;
+    }
+    .view-btn {
+      background-color: #2196F3;
+    }
+    .view-btn:hover {
+      background-color: #0b7dda;
+    }
+    .delete-btn {
+      background-color: #f44336;
+    }
+    .delete-btn:hover {
+      background-color: #d32f2f;
+    }
+  </style>
+</head>
+<body>
+  <h1>Document Upload API Test</h1>
+  
+  <div class="container">
+    <h2>Upload Document</h2>
+    <input type="file" id="fileInput" accept=".pdf" />
+    <div>
+      <button id="uploadBtn">Upload File</button>
+    </div>
+    <div id="uploadResult"></div>
+  </div>
+  
+  <div class="container">
+    <h2>Document List</h2>
+    <button id="refreshBtn">Refresh List</button>
+    <ul id="documentList"></ul>
+  </div>
+  
+  <div class="container">
+    <h2>API Response</h2>
+    <pre id="responseOutput"></pre>
+  </div>
+
+  <script>
+    const API_BASE_URL = 'http://localhost:8000';
+    let lastUploadedDocId = null;
+    
+    // Upload document
+    document.getElementById('uploadBtn').addEventListener('click', async () => {
+      const fileInput = document.getElementById('fileInput');
+      const file = fileInput.files[0];
+      const resultDiv = document.getElementById('uploadResult');
+      const responseOutput = document.getElementById('responseOutput');
+      
+      if (!file) {
+        resultDiv.innerHTML = '<p class="error">Please select a file</p>';
+        return;
+      }
+      
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      try {
+        resultDiv.innerHTML = '<p>Uploading...</p>';
+        
+        const response = await fetch(`${API_BASE_URL}/api/documents/upload`, {
+          method: 'POST',
+          body: formData,
+        });
+        
+        const data = await response.json();
+        responseOutput.textContent = JSON.stringify(data, null, 2);
+        
+        if (response.ok) {
+          lastUploadedDocId = data.document_id;
+          resultDiv.innerHTML = `<p class="success">Upload successful! Document ID: ${data.document_id}</p>`;
+          refreshDocumentList();
+        } else {
+          resultDiv.innerHTML = `<p class="error">Upload failed: ${data.detail || 'Unknown error'}</p>`;
+        }
+      } catch (error) {
+        resultDiv.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+        responseOutput.textContent = error.toString();
+      }
+    });
+    
+    // Refresh document list
+    async function refreshDocumentList() {
+      const listElement = document.getElementById('documentList');
+      const responseOutput = document.getElementById('responseOutput');
+      
+      try {
+        listElement.innerHTML = '<li>Loading documents...</li>';
+        
+        const response = await fetch(`${API_BASE_URL}/api/documents?page=1&page_size=10`);
+        const data = await response.json();
+        
+        responseOutput.textContent = JSON.stringify(data, null, 2);
+        
+        if (response.ok) {
+          if (data.length === 0) {
+            listElement.innerHTML = '<li>No documents found</li>';
+            return;
+          }
+          
+          listElement.innerHTML = '';
+          data.forEach(doc => {
+            const li = document.createElement('li');
+            li.innerHTML = `
+              <div class="document-item">
+                <div>
+                  <strong>${doc.filename}</strong>
+                  <div>ID: ${doc.id}</div>
+                  <div>Uploaded: ${new Date(doc.upload_timestamp).toLocaleString()}</div>
+                </div>
+                <div class="document-actions">
+                  <button class="view-btn" data-id="${doc.id}">View</button>
+                  <button class="delete-btn" data-id="${doc.id}">Delete</button>
+                </div>
+              </div>
+            `;
+            
+            // Highlight newly uploaded document
+            if (doc.id === lastUploadedDocId) {
+              li.style.backgroundColor = '#e6ffe6';
+              li.scrollIntoView({ behavior: 'smooth' });
+            }
+            
+            listElement.appendChild(li);
+          });
+          
+          // Add event listeners for view and delete buttons
+          document.querySelectorAll('.view-btn').forEach(btn => {
+            btn.addEventListener('click', () => viewDocument(btn.dataset.id));
+          });
+          
+          document.querySelectorAll('.delete-btn').forEach(btn => {
+            btn.addEventListener('click', () => deleteDocument(btn.dataset.id));
+          });
+        } else {
+          listElement.innerHTML = `<li class="error">Failed to fetch documents: ${data.detail || 'Unknown error'}</li>`;
+        }
+      } catch (error) {
+        listElement.innerHTML = `<li class="error">Error: ${error.message}</li>`;
+        responseOutput.textContent = error.toString();
+      }
+    }
+    
+    // View document
+    async function viewDocument(docId) {
+      const responseOutput = document.getElementById('responseOutput');
+      
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/documents/${docId}`);
+        const data = await response.json();
+        
+        responseOutput.textContent = JSON.stringify(data, null, 2);
+        
+        // Open document in a new tab if URL is available
+        if (data.file_url) {
+          window.open(data.file_url, '_blank');
+        } else {
+          alert('Document view URL not available');
+        }
+      } catch (error) {
+        responseOutput.textContent = error.toString();
+        alert(`Error viewing document: ${error.message}`);
+      }
+    }
+    
+    // Delete document
+    async function deleteDocument(docId) {
+      if (!confirm(`Are you sure you want to delete this document?`)) {
+        return;
+      }
+      
+      const responseOutput = document.getElementById('responseOutput');
+      
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/documents/${docId}`, {
+          method: 'DELETE'
+        });
+        
+        if (response.ok) {
+          responseOutput.textContent = 'Document deleted successfully';
+          refreshDocumentList();
+        } else {
+          const data = await response.json();
+          responseOutput.textContent = JSON.stringify(data, null, 2);
+          alert(`Failed to delete document: ${data.detail || 'Unknown error'}`);
+        }
+      } catch (error) {
+        responseOutput.textContent = error.toString();
+        alert(`Error deleting document: ${error.message}`);
+      }
+    }
+    
+    // Initial load
+    document.getElementById('refreshBtn').addEventListener('click', refreshDocumentList);
+    refreshDocumentList();
+  </script>
+</body>
+</html>
