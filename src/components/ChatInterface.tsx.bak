@@ -1,0 +1,81 @@
+import React, { useState } from 'react';
+import { Send } from 'lucide-react';
+import { Message } from '../types';
+
+interface ChatInterfaceProps {
+  messages: Message[];
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
+}
+
+export default function ChatInterface({ messages, setMessages }: ChatInterfaceProps) {
+  const [input, setInput] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      sessionId: 'current-session',
+      timestamp: new Date().toISOString(),
+      role: 'user',
+      content: input,
+      referencedDocuments: [],
+      referencedAnalyses: []
+    };
+
+    const assistantMessage: Message = {
+      id: crypto.randomUUID(),
+      sessionId: 'current-session',
+      timestamp: new Date().toISOString(),
+      role: 'assistant',
+      content: 'I received your message. How can I help you analyze this financial document?',
+      referencedDocuments: [],
+      referencedAnalyses: []
+    };
+
+    setMessages(prev => [...prev, userMessage, assistantMessage]);
+    setInput('');
+  };
+
+  return (
+    <div className="flex-1 flex flex-col">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {messages.map((message) => (
+          <div
+            key={message.id}
+            className={`flex ${message.role === 'assistant' ? 'justify-start' : 'justify-end'}`}
+          >
+            <div
+              className={`max-w-[80%] rounded-lg px-4 py-2 ${
+                message.role === 'assistant'
+                  ? 'bg-gray-100 text-gray-900'
+                  : 'bg-indigo-600 text-white'
+              }`}
+            >
+              {message.content}
+            </div>
+          </div>
+        ))}
+      </div>
+      
+      <form onSubmit={handleSubmit} className="p-4 border-t border-gray-200">
+        <div className="flex space-x-4">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask about your financial documents..."
+            className="flex-1 rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+          />
+          <button
+            type="submit"
+            className="bg-indigo-600 text-white rounded-lg px-4 py-2 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+          >
+            <Send className="h-5 w-5" />
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
