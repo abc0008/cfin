@@ -1,25 +1,22 @@
 import os
-import uuid
-import logging
-from typing import Dict, List, Any, Optional, Tuple, TypedDict, Union, cast
-from enum import Enum
 import json
+import gc
+import logging
+import psutil
 import re
-import datetime
-import base64
-import string
+import uuid
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple, TypedDict, cast
+from enum import Enum
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from anthropic import Anthropic
+from langchain_core.messages import SystemMessage
 from langchain_anthropic import ChatAnthropic
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import tool
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from models.message import Message, MessageRole
-from models.citation import Citation, CitationType
+from utils.database import SessionLocal
 from models.document import ProcessedDocument
 
 logger = logging.getLogger(__name__)
@@ -56,14 +53,16 @@ class LangGraphService:
         
         self.model = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
         # Initialize with parameters set for the latest Claude model which has citation support built-in
+        # Note: We don't use the LangChain wrapper's PDF support - we handle PDFs directly in the simple_document_qa method
         self.llm = ChatAnthropic(
             model=self.model,
-            temperature=0.2,
+            temperature=0.3,
             anthropic_api_key=api_key,
             max_tokens=4000,
-            # Use model_kwargs to set the system message and any other model-specific parameters
+            # Use model_kwargs to set the system message and other model-specific parameters
             model_kwargs={
                 "system": "You are a financial document analysis assistant that provides precise answers with citations. Always cite your sources when answering questions about documents."
+                # We don't need the PDF beta flag here since we handle PDFs directly in the simple_document_qa method
             }
         )
         
@@ -78,6 +77,8 @@ class LangGraphService:
         
         # Setup conversation graph
         self.conversation_graph = self._create_conversation_graph()
+        # Also set workflow attribute for consistent naming
+        self.workflow = self.conversation_graph
         
         logger.info(f"LangGraphService initialized with model: {self.model}")
     
@@ -192,67 +193,213 @@ class LangGraphService:
             return "response_generator"
     
     def _document_processor_node(self, state: AgentState) -> AgentState:
-        """Process documents in the conversation context."""
-        # Get user message
-        user_message = self._get_latest_user_message(state)
-        if not user_message:
+        """Process documents referenced in the conversation."""
+        active_docs = state.get("active_documents", [])
+        logger.info(f"Document processor node triggered with {len(active_docs)} active document(s)")
+        logger.info(f"Active document IDs: {active_docs}")
+        
+        documents = state.get("documents", [])
+        document_ids = [doc.get("id") for doc in documents]
+        logger.info(f"Current document IDs in state: {document_ids}")
+        
+        # Check if we need to add documents to the state
+        docs_to_add = [doc_id for doc_id in active_docs if doc_id not in document_ids]
+        
+        if not docs_to_add:
+            logger.info("No new documents to add to state")
             return state
         
-        # Prepare document context from state
-        document_context = self._prepare_document_context(state)
+        logger.info(f"Documents to add: {docs_to_add}")
         
-        # Create prompt with document context
-        messages = self._format_messages_for_llm(state, self.document_processor_prompt)
+        # Get document content for each document ID
+        for doc_id in docs_to_add:
+            try:
+                doc_content = self._get_document_content(doc_id)
+                
+                # Log document content status
+                if doc_content:
+                    content_length = len(doc_content)
+                    preview = doc_content[:100] + "..." if content_length > 100 else doc_content
+                    logger.info(f"Retrieved content for document {doc_id} ({content_length} chars)")
+                    logger.info(f"Content preview: {preview}")
+                else:
+                    logger.warning(f"No content found for document {doc_id}")
+                
+                # Add document to state
+                doc_data = {
+                    "id": doc_id,
+                    "raw_text": doc_content
+                }
+                documents.append(doc_data)
+                logger.info(f"Added document {doc_id} to state")
+            except Exception as e:
+                logger.error(f"Error retrieving content for document {doc_id}: {str(e)}")
+                logger.exception(e)
+                # Add an empty document with an error flag
+                documents.append({
+                    "id": doc_id,
+                    "raw_text": f"[Error retrieving document content: {str(e)}]",
+                    "error": True
+                })
         
-        # Add document context to system message
-        if document_context and messages:
-            # Add document context to first system message
-            for i, msg in enumerate(messages):
-                if isinstance(msg, SystemMessage):
-                    messages[i] = SystemMessage(content=f"{msg.content}\n\n{document_context}")
-                    break
+        # Update the state with the new documents
+        state["documents"] = documents
+        logger.info(f"Updated state with {len(state['documents'])} documents")
         
-        # Call LLM with document context to extract relevant information
-        response = self.llm.invoke(messages)
+        # Log memory usage after processing
+        current_memory = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+        logger.info(f"Current memory usage after document processing: {current_memory:.2f} MB")
         
-        # Update state with processed document information
-        new_state = state.copy()
-        new_state["context"] = {
-            **new_state.get("context", {}),
-            "processed_documents": response.content
-        }
-        
-        return new_state
+        return state
     
-    def _response_generator_node(self, state: AgentState) -> AgentState:
-        """Generate a response based on processed documents and user query."""
-        # Prepare messages with document context and processed documents
-        messages = self._format_messages_for_llm(state, self.response_generator_prompt)
-        
-        # Add processed document information to system message if available
-        processed_docs = state.get("context", {}).get("processed_documents")
-        if processed_docs and messages:
-            # Add processed document info to first system message
-            for i, msg in enumerate(messages):
-                if isinstance(msg, SystemMessage):
-                    messages[i] = SystemMessage(content=f"{msg.content}\n\nDocument Analysis:\n{processed_docs}")
-                    break
-        
-        # Call LLM to generate response
-        response = self.llm.invoke(messages)
-        
-        # Extract citations from response
-        response_content, citations_used = self._extract_citations_from_text(response.content, state["citations"])
-        
-        # Update state with response and citations
-        new_state = state.copy()
-        new_state["current_response"] = {
-            "content": response_content,
-            "role": "assistant"
-        }
-        new_state["citations_used"] = citations_used
-        
-        return new_state
+    async def _response_generator_node(
+        self, 
+        state: AgentState, 
+        anthropic_api_key: Optional[str] = None, 
+        claude_model: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Generate a response using Claude or Anthropic API."""
+        try:
+            # Monitor memory and track memory usage pattern throughout processing
+            memory_usage = self._monitor_memory_usage("response_generator_start")
+            self._optimize_memory_if_needed(memory_usage)
+            
+            # Prepare model name and API key
+            model = claude_model or os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-latest")
+            api_key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
+            
+            if not api_key:
+                logger.error("No Anthropic API key provided")
+                return {"response": "Error: Missing Anthropic API key configuration."}
+            
+            logger.info(f"Generating response using model: {model}")
+            
+            # Get the latest user message
+            latest_message = self._get_latest_user_message(state)
+            
+            if not latest_message:
+                logger.warning("No latest user message found")
+                return {"response": "I don't see a question to respond to."}
+            
+            query = latest_message.get("content", "")
+            logger.info(f"User query: {query[:100]}...")
+            
+            # Prepare document context
+            document_context = self._prepare_document_context(state)
+            
+            # Check if we have any document content
+            if not document_context:
+                logger.warning("No document context available for LLM messages")
+                
+                # Check if we should have documents
+                active_docs = state.get("active_documents", [])
+                if active_docs:
+                    logger.warning(f"Expected documents ({active_docs}) but couldn't prepare context")
+                    return {
+                        "response": "I'm having trouble retrieving the document content. Please check that the document was properly uploaded and try again."
+                    }
+            else:
+                doc_context_length = len(document_context)
+                logger.info(f"Document context prepared: {doc_context_length} characters")
+                
+                # Log a preview of the document context
+                preview_length = min(200, doc_context_length)
+                if preview_length > 0:
+                    logger.info(f"Document context preview: {document_context[:preview_length]}...")
+            
+            # Prepare conversation history
+            messages = []
+            
+            # System message
+            system_message = """You are a financial document assistant. Your role is to analyze financial documents and answer questions about them.
+When referencing information from documents, always provide citations that include document ID and 
+the relevant section or page if available.
+Format your responses in well-structured markdown.
+"""
+            messages.append({"role": "system", "content": system_message})
+            
+            # Add document context as a system message if available
+            if document_context:
+                context_message = f"Here are the financial documents to reference:\n\n{document_context}"
+                messages.append({"role": "system", "content": context_message})
+            
+            # Add conversation history
+            chat_history = state.get("messages", [])
+            for msg in chat_history[-10:]:  # Last 10 messages to stay within context limits
+                role = "user" if msg.get("role") == "user" else "assistant"
+                content = msg.get("content", "")
+                
+                # Skip empty messages
+                if not content:
+                    continue
+                    
+                messages.append({"role": role, "content": content})
+            
+            # Add the latest query from the user if not already included
+            if messages[-1]["role"] != "user":
+                messages.append({"role": "user", "content": query})
+                
+            # Log the full prompt for debugging
+            message_summary = "\n".join([f"{m['role']}: {m['content'][:50]}..." for m in messages])
+            logger.info(f"Sending messages to Claude:\n{message_summary}")
+            
+            # Check memory before API call
+            pre_api_memory = self._monitor_memory_usage("before_claude_api_call")
+            self._optimize_memory_if_needed(pre_api_memory)
+            
+            # Set up the client
+            client = Anthropic(api_key=api_key)
+            
+            # Prepare request parameters
+            params = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": 4000,
+                "temperature": 0.2,
+            }
+            
+            # Add citation support if the model supports it (claude-3-5-sonnet models)
+            if "claude-3-5-sonnet" in model:
+                logger.info("Using model with citation support")
+                params["citation_search"] = {
+                    "enabled": True,
+                    "annotations": {"citations": True}
+                }
+            
+            # Generate the response from Claude
+            logger.info("Sending request to Claude API")
+            start_time = time.time()
+            
+            response = client.messages.create(**params)
+            
+            end_time = time.time()
+            logger.info(f"Claude API response received in {end_time - start_time:.2f} seconds")
+            
+            # Process the response
+            ai_response = response.content[0].text
+            logger.info(f"Response length: {len(ai_response)} characters")
+            logger.info(f"Response preview: {ai_response[:200]}...")
+            
+            # Extract and format citations
+            citations = self._process_citations_from_response(response, ai_response)
+            
+            # Monitor memory after processing
+            post_memory = self._monitor_memory_usage("response_generator_end")
+            self._optimize_memory_if_needed(post_memory)
+            
+            # Return the response with citations
+            return {
+                "response": ai_response,
+                "citations": citations
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}")
+            logger.exception(e)
+            return {
+                "response": "I encountered an error while processing your request. Please try again or contact support if the issue persists.",
+                "error": str(e)
+            }
     
     def _citation_processor_node(self, state: AgentState) -> AgentState:
         """Process and validate citations in the response."""
@@ -294,61 +441,185 @@ class LangGraphService:
         
         return new_state
     
-    def _format_messages_for_llm(self, state: AgentState, system_prompt: Optional[str] = None, is_router: bool = False) -> List[BaseMessage]:
-        """Format conversation messages for LLM input."""
-        formatted_messages = []
+    def _format_messages_for_llm(self, state: AgentState, system_prompt: Optional[str] = None, is_router: bool = False) -> List[Dict[str, Any]]:
+        """Format messages for LLM with appropriate system prompt and document context."""
+        # Use the router prompt if is_router is True
+        if is_router:
+            system_prompt = self.router_prompt
+        elif system_prompt is None:
+            system_prompt = self.response_generator_prompt
+            
+        # Get document context
+        document_context = ""
+        if "document_context" in state and state["document_context"]:
+            # Use the cached document context if available
+            document_context = state["document_context"]
+            logger.info("Using cached document context from state")
+        else:
+            # Generate it fresh if not cached
+            document_context = self._prepare_document_context(state)
+            logger.info(f"Generated fresh document context (length: {len(document_context)})")
         
-        # Add system message
-        if system_prompt:
-            formatted_messages.append(SystemMessage(content=system_prompt))
-        elif is_router:
-            formatted_messages.append(SystemMessage(content=self.router_prompt))
+        # Log if document context is available
+        if document_context:
+            logger.info(f"Document context available for LLM messages (length: {len(document_context)})")
+        else:
+            logger.warning("No document context available for LLM messages")
+        
+        # Enhance system prompt with document context
+        enhanced_system_prompt = system_prompt
+        if document_context:
+            # Create a system prompt that clearly separates document content from instructions
+            enhanced_system_prompt = f"""
+{system_prompt}
+
+YOU HAVE ACCESS TO THE FOLLOWING DOCUMENTS:
+-------------------------------------------------
+{document_context}
+-------------------------------------------------
+
+IMPORTANT INSTRUCTIONS:
+1. These documents contain financial information that you MUST use to answer the user's questions.
+2. Always reference the specific document and its content in your responses.
+3. If you can't find relevant information in the documents, acknowledge this limitation.
+4. If no document is available, inform the user that you need a document uploaded to answer their question.
+"""
+            logger.info("Enhanced system prompt with document context")
+        
+        # Format messages for the LLM
+        messages = []
+        
+        # Add system message with enhanced prompt
+        messages.append({
+            "role": "system",
+            "content": enhanced_system_prompt
+        })
         
         # Add conversation history
-        for msg in state["messages"]:
+        for msg in state.get("messages", []):
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
-            if role == "user":
-                formatted_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                formatted_messages.append(AIMessage(content=content))
-            elif role == "system":
-                formatted_messages.append(SystemMessage(content=content))
+            # Skip system messages in history
+            if role != "system":
+                messages.append({
+                    "role": role,
+                    "content": content
+                })
         
-        # Add current user message if it exists and not already in history
-        if state.get("current_message") and state["current_message"] not in state["messages"]:
+        # Add current message if present
+        if state.get("current_message"):
             current_msg = state["current_message"]
-            formatted_messages.append(HumanMessage(content=current_msg["content"]))
+            messages.append({
+                "role": current_msg.get("role", "user"),
+                "content": current_msg.get("content", "")
+            })
         
-        return formatted_messages
+        # Log message count and message roles
+        message_roles = [msg["role"] for msg in messages]
+        logger.info(f"Formatted {len(messages)} messages for LLM with roles: {message_roles}")
+        
+        # Check if document context is actually included in the system prompt
+        if document_context and "DOCUMENTS" in messages[0]["content"]:
+            preview = messages[0]["content"][:100] + "..." if len(messages[0]["content"]) > 100 else messages[0]["content"]
+            logger.info(f"System prompt with document context preview: {preview}")
+        
+        return messages
     
     def _prepare_document_context(self, state: AgentState) -> str:
         """Prepare document context for inclusion in LLM prompt."""
         if not state.get("documents"):
+            logger.warning("No documents available in state for document context preparation")
+            logger.warning(f"State keys: {list(state.keys())}")
+            logger.warning(f"Active documents: {state.get('active_documents', [])}")
             return ""
         
-        context_parts = ["Document Context:"]
+        document_context = []
+        logger.info(f"Preparing document context from {len(state.get('documents', []))} documents")
         
-        for i, doc in enumerate(state["documents"]):
-            doc_title = doc.get("title", f"Document {i+1}")
-            doc_type = doc.get("document_type", "unknown")
-            doc_summary = doc.get("summary", "No summary available")
+        for i, doc in enumerate(state.get("documents", [])):
+            doc_id = doc.get("id", f"doc_{i}")
+            title = doc.get("title", "") or doc.get("name", f"Document {i+1}")
             
-            context_parts.append(f"Document {i+1}: {doc_title}")
-            context_parts.append(f"Type: {doc_type}")
-            context_parts.append(f"Summary: {doc_summary}\n")
-        
-        if state.get("citations"):
-            context_parts.append("Available Citations:")
-            for i, citation in enumerate(state["citations"]):
-                cite_id = citation.get("id", f"citation_{i}")
-                cite_text = citation.get("text", "")[:100] + "..." if len(citation.get("text", "")) > 100 else citation.get("text", "")
-                doc_title = citation.get("document_title", "Unknown document")
+            logger.info(f"Processing document {i+1}: ID={doc_id}, Title={title}")
+            logger.info(f"Document keys: {list(doc.keys())}")
+            
+            # Check for raw_text in different possible locations
+            raw_text = ""
+            content_source = "none"
+            
+            # Try to get raw_text directly from the document
+            if "raw_text" in doc and doc.get("raw_text"):
+                raw_text = doc.get("raw_text")
+                content_source = "raw_text"
+                logger.info(f"Found content in raw_text field for document {doc_id} ({len(raw_text)} characters)")
+            
+            # If no raw_text directly, try extracted_data
+            elif "extracted_data" in doc and doc.get("extracted_data"):
+                logger.info(f"Extracted data keys: {list(doc.get('extracted_data', {}).keys())}")
                 
-                context_parts.append(f"[Citation: {cite_id}] \"{cite_text}\" from {doc_title}")
+                if "raw_text" in doc.get("extracted_data", {}):
+                    raw_text = doc.get("extracted_data").get("raw_text")
+                    content_source = "extracted_data.raw_text"
+                    logger.info(f"Found content in extracted_data.raw_text for document {doc_id} ({len(raw_text)} characters)")
+                
+                # For chunked large documents, use a summarized version
+                elif "text_chunks" in doc.get("extracted_data") and doc.get("extracted_data").get("text_chunks"):
+                    chunks = doc.get("extracted_data").get("text_chunks")
+                    content_source = "extracted_data.text_chunks"
+                    # Use first chunk, middle chunk, and last chunk to represent the document
+                    if len(chunks) <= 3:
+                        raw_text = "\n\n".join(chunks)
+                    else:
+                        raw_text = f"{chunks[0]}\n\n[...Document continues...]\n\n{chunks[len(chunks)//2]}\n\n[...Document continues...]\n\n{chunks[-1]}"
+                    logger.info(f"Using chunked text for large document {doc_id} ({len(raw_text)} characters from {len(chunks)} chunks)")
+            
+            # If we still don't have content, check other common fields
+            if not raw_text and "content" in doc and doc.get("content"):
+                raw_text = doc.get("content")
+                content_source = "content"
+                logger.info(f"Found content in content field for document {doc_id} ({len(raw_text)} characters)")
+                
+            if not raw_text and "text" in doc and doc.get("text"):
+                raw_text = doc.get("text")
+                content_source = "text"
+                logger.info(f"Found content in text field for document {doc_id} ({len(raw_text)} characters)")
+            
+            if raw_text:
+                # Truncate very long documents to prevent context overflow
+                MAX_DOC_LENGTH = 10000  # Characters per document
+                truncated = False
+                
+                if len(raw_text) > MAX_DOC_LENGTH:
+                    original_length = len(raw_text)
+                    raw_text = raw_text[:MAX_DOC_LENGTH] + f"\n\n[Document truncated due to length. Original size: {original_length} characters]"
+                    truncated = True
+                    logger.info(f"Truncated document {doc_id} from {original_length} to {MAX_DOC_LENGTH} chars for context")
+                
+                document_context.append(
+                    f"Document: {title}\n"
+                    f"ID: {doc_id}\n"
+                    f"Content: {raw_text}\n"
+                    f"------ END OF DOCUMENT ------\n"
+                )
+                logger.info(f"Added document {doc_id} to context (source: {content_source}, truncated: {truncated})")
+            else:
+                logger.warning(f"No content found for document {doc_id} in any expected field")
+                # Add placeholder for document with no content
+                document_context.append(
+                    f"Document: {title}\n"
+                    f"ID: {doc_id}\n"
+                    f"Content: [No content available]\n"
+                    f"------ END OF DOCUMENT ------\n"
+                )
         
-        return "\n".join(context_parts)
+        final_context = "\n\n".join(document_context)
+        logger.info(f"Final document context prepared: {len(final_context)} characters, {len(document_context)} documents")
+        
+        if not final_context:
+            logger.warning("Document context preparation resulted in EMPTY context!")
+        
+        return final_context
     
     def _get_latest_user_message(self, state: AgentState) -> Optional[Dict[str, Any]]:
         """Get the latest user message from state."""
@@ -433,10 +704,9 @@ class LangGraphService:
                 }
             }
             
-            # Store state in memory
+            # Store state in conversation_states directly
             thread_id = f"conversation_{conversation_id}"
-            config = self.conversation_graph.get_config()
-            self.memory.save(thread_id, config.name, initial_state)
+            self.conversation_states[thread_id] = initial_state
             
             return {
                 "conversation_id": conversation_id,
@@ -466,10 +736,9 @@ class LangGraphService:
         try:
             logger.info(f"Adding {len(documents)} documents to conversation {conversation_id}")
             
-            # Get current state
+            # Get current state from conversation_states dictionary
             thread_id = f"conversation_{conversation_id}"
-            config = self.conversation_graph.get_config()
-            state = cast(AgentState, self.memory.load(thread_id, config.name))
+            state = self.conversation_states.get(thread_id)
             
             if not state:
                 raise ValueError(f"Conversation {conversation_id} not found")
@@ -479,14 +748,30 @@ class LangGraphService:
             all_citations = []
             
             for doc in documents:
+                # Extract document content from extracted_data if available
+                raw_text = ""
+                if hasattr(doc, "extracted_data") and doc.extracted_data:
+                    if "raw_text" in doc.extracted_data:
+                        raw_text = doc.extracted_data["raw_text"]
+                        logger.info(f"Using raw_text for document {doc.metadata.id} ({len(raw_text)} characters)")
+                
+                # Create truncated summary for UI display purposes
+                summary = raw_text[:500] + "..." if len(raw_text) > 500 else raw_text
+                
                 # Extract basic document info
                 doc_info = {
                     "id": str(doc.metadata.id),
                     "title": doc.metadata.filename,
                     "document_type": doc.content_type.value,
-                    "summary": doc.extracted_data.get("raw_text", "")[:500] + "..." if len(doc.extracted_data.get("raw_text", "")) > 500 else doc.extracted_data.get("raw_text", ""),
+                    "summary": summary,
+                    "raw_text": raw_text,  # Include full raw text for LLM context
                     "upload_timestamp": str(doc.metadata.upload_timestamp)
                 }
+                
+                # Add extracted_data as well if it exists
+                if hasattr(doc, "extracted_data") and doc.extracted_data:
+                    doc_info["extracted_data"] = doc.extracted_data
+                
                 doc_data.append(doc_info)
                 
                 # Extract citations
@@ -515,7 +800,7 @@ class LangGraphService:
                     new_state["active_documents"].append(doc_id)
             
             # Save updated state
-            self.memory.save(thread_id, config.name, new_state)
+            self.conversation_states[thread_id] = new_state
             
             return {
                 "conversation_id": conversation_id,
@@ -531,105 +816,112 @@ class LangGraphService:
     async def process_message(
         self, 
         conversation_id: str, 
-        message_content: str,
-        cited_document_ids: Optional[List[str]] = None
+        message_text: str,
+        user_id: Optional[str] = None,
+        message_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Process a user message through the LangGraph conversation flow.
+        Process a message within a conversation.
         
         Args:
             conversation_id: ID of the conversation
-            message_content: User message content
-            cited_document_ids: Optional list of document IDs explicitly cited by the user
+            message_text: Text of the message to process
+            user_id: Optional ID of the user sending the message
+            message_id: Optional ID of the message
             
         Returns:
-            Processing result with AI response
+            Result containing the response, citations, and status
         """
         try:
-            logger.info(f"Processing message in conversation {conversation_id}")
+            # Initialize conversation state if it doesn't exist
+            if conversation_id not in self.conversation_states:
+                logger.info(f"Initializing new conversation state for {conversation_id}")
+                self.conversation_states[conversation_id] = self._create_empty_state()
+                self.conversation_states[conversation_id]["conversation_id"] = conversation_id
             
-            # Get current state
-            thread_id = f"conversation_{conversation_id}"
-            config = self.conversation_graph.get_config()
-            state = cast(AgentState, self.memory.load(thread_id, config.name))
+            # Get the conversation state
+            state = self.conversation_states[conversation_id]
             
-            if not state:
-                raise ValueError(f"Conversation {conversation_id} not found")
-            
-            # Create message object
-            message = {
-                "role": "user",
-                "content": message_content,
-                "cited_document_ids": cited_document_ids or []
-            }
-            
-            # Update state with new message
-            new_state = state.copy()
-            new_state["messages"].append(message)
-            new_state["current_message"] = message
-            
-            # If user explicitly cites documents, update active documents
-            if cited_document_ids:
-                for doc_id in cited_document_ids:
-                    if doc_id not in new_state["active_documents"]:
-                        new_state["active_documents"].append(doc_id)
-            
-            # Save updated state before processing
-            self.memory.save(thread_id, config.name, new_state)
-            
-            # Process message through LangGraph
-            for events in self.conversation_graph.stream(new_state, thread_id):
-                # Process events if needed (for real-time updates)
-                pass
-            
-            # Get final state after processing
-            final_state = cast(AgentState, self.memory.load(thread_id, config.name))
-            
-            # Extract response
-            if final_state.get("messages", []) and final_state["messages"][-1].get("role") == "assistant":
-                # Get response from last message
-                response = final_state["messages"][-1]
-                assistant_message = {
-                    "content": response.get("content", ""),
-                    "role": "assistant",
-                    "citations": response.get("citations", [])
-                }
-            else:
-                # Fallback if no response was generated
-                assistant_message = {
-                    "content": "I'm sorry, I was unable to process your request.",
-                    "role": "assistant",
-                    "citations": []
-                }
+            # Add user message to conversation
+            if "messages" not in state:
+                state["messages"] = []
                 
-                # Add fallback message to state
-                final_state["messages"].append(assistant_message)
-                self.memory.save(thread_id, config.name, final_state)
-            
-            # Format citations for response
-            citations_data = []
-            for citation in assistant_message.get("citations", []):
-                citation_obj = {
-                    "id": citation.get("id", ""),
-                    "text": citation.get("text", ""),
-                    "document_id": citation.get("document_id", ""),
-                    "document_title": citation.get("document_title", ""),
-                    "page": citation.get("page", 0)
-                }
-                citations_data.append(citation_obj)
-            
-            return {
-                "conversation_id": conversation_id,
-                "message_id": str(uuid.uuid4()),
-                "content": assistant_message["content"],
-                "role": assistant_message["role"],
-                "citations": citations_data
+            user_message = {
+                "id": message_id or str(uuid.uuid4()),
+                "role": "user",
+                "content": message_text,
+                "created_at": datetime.now().isoformat(),
+                "user_id": user_id
             }
+            
+            state["messages"].append(user_message)
+            state["current_message"] = user_message
+            
+            # Run the message through our workflow graph
+            logger.info(f"Running message through workflow for conversation {conversation_id}")
+            try:
+                # Execute the graph with the current state
+                result = await self.workflow.ainvoke(state)
+                
+                if not result:
+                    logger.error("No result returned from workflow")
+                    raise ValueError("No result returned from workflow")
+                
+                # Extract the AI response from the result
+                if 'messages' in result and len(result['messages']) > 0:
+                    # Get the latest AI message
+                    ai_messages = [msg for msg in result['messages'] if msg['role'] == 'assistant']
+                    
+                    if ai_messages:
+                        latest_ai_message = ai_messages[-1]
+                        response_content = latest_ai_message.get('content', '')
+                        
+                        # Extract citations if available
+                        citations = []
+                        if latest_ai_message.get('citations'):
+                            citations = latest_ai_message['citations']
+                            logger.info(f"Found {len(citations)} citations in response")
+                        
+                        # Update the stored state with the new state including AI response
+                        self.conversation_states[conversation_id] = result
+                        
+                        # Return the response and any citations
+                        return {
+                            "response": response_content,
+                            "citations": citations,
+                            "status": "success"
+                        }
+                    else:
+                        logger.warning("No assistant message found in result")
+                        return {
+                            "response": "I couldn't generate a response at this time.",
+                            "citations": [],
+                            "status": "error"
+                        }
+                else:
+                    logger.warning("No messages found in result")
+                    return {
+                        "response": "I couldn't generate a response at this time.",
+                        "citations": [],
+                        "status": "error"
+                    }
+                
+            except Exception as e:
+                logger.error(f"Error in workflow execution: {str(e)}", exc_info=True)
+                return {
+                    "response": f"An error occurred while processing your message: {str(e)}",
+                    "citations": [],
+                    "status": "error"
+                }
             
         except Exception as e:
-            logger.exception(f"Error processing message: {e}")
-            raise
-
+            logger.error(f"Error processing message: {str(e)}", exc_info=True)
+            return {
+                "response": f"An error occurred while processing your message: {str(e)}",
+                "citations": [],
+                "status": "error"
+            }
+    
     async def get_conversation_history(
         self, 
         conversation_id: str,
@@ -698,137 +990,233 @@ class LangGraphService:
         try:
             logger.info(f"Running simple_document_qa with {len(documents)} documents")
             
-            # Prepare documents for citation - ensure they have citations enabled
-            prepared_documents = []
-            for doc in documents:
-                # Convert document to the format expected by Claude API with citations enabled
-                prepared_doc = {
-                    "type": "document",
-                    "title": doc.get("title", f"Document {doc.get('id', '')}"),
-                    "citations": {"enabled": True}
+            # Check for empty document list
+            if not documents:
+                logger.warning("No documents provided to simple_document_qa")
+                return {
+                    "content": "I don't have any documents to analyze. Please upload a document first.",
+                    "citations": []
                 }
-                
-                # Handle different document types
-                doc_type = doc.get("mime_type", "").lower()
-                doc_content = doc.get("content", "")
-                
-                if "pdf" in doc_type or doc_type == "application/pdf":
-                    # PDF document
-                    if isinstance(doc_content, bytes):
-                        prepared_doc["source"] = {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": base64.b64encode(doc_content).decode()
-                        }
-                    elif isinstance(doc_content, str):
-                        # Check if it's already base64 encoded
-                        if all(c in string.ascii_letters + string.digits + '+/=' for c in doc_content):
-                            prepared_doc["source"] = {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": doc_content
-                            }
-                        else:
-                            # Encode it as base64
-                            prepared_doc["source"] = {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": base64.b64encode(doc_content.encode('utf-8')).decode()
-                            }
-                    else:
-                        logger.warning(f"Skipping document with invalid content: {doc.get('id', '')}")
-                        continue
-                else:
-                    # Plain text document
-                    if isinstance(doc_content, bytes):
-                        text_content = doc_content.decode('utf-8', errors='replace')
-                    else:
-                        text_content = str(doc_content)
-                    
-                    prepared_doc["source"] = {
-                        "type": "text",
-                        "media_type": "text/plain",
-                        "data": text_content
-                    }
-                
-                # Add document metadata as context if available (optional)
-                if "metadata" in doc:
-                    prepared_doc["context"] = json.dumps(doc["metadata"])
-                
-                prepared_documents.append(prepared_doc)
             
-            # Prepare user message content with documents and question
+            # Detailed document diagnostic logging
+            logger.info(f"===== Begin document diagnostic information for {len(documents)} documents =====")
+            for i, doc in enumerate(documents):
+                # Basic document metadata
+                doc_id = doc.get('id', f'doc_{i}')
+                doc_type = doc.get("document_type", doc.get("mime_type", "unknown"))
+                doc_title = doc.get("title", doc.get("filename", f"Untitled document {i}"))
+                
+                # Content availability checks
+                has_raw_text = 'raw_text' in doc and bool(doc.get('raw_text'))
+                raw_text_len = len(doc.get('raw_text', '')) if has_raw_text else 0
+                
+                has_content = 'content' in doc and bool(doc.get('content'))
+                content_type = type(doc.get('content')).__name__ if has_content else "None"
+                content_len = len(doc.get('content', '')) if has_content and isinstance(doc.get('content'), (str, bytes)) else 0
+                
+                has_extracted_data = 'extracted_data' in doc and bool(doc.get('extracted_data'))
+                has_text = 'text' in doc and bool(doc.get('text'))
+                
+                # Log comprehensive document info
+                logger.info(f"Document {i+1}/{len(documents)} - ID: {doc_id}, Title: {doc_title}, Type: {doc_type}")
+                logger.info(f"Content availability: raw_text={has_raw_text}({raw_text_len} chars), content={has_content}({content_type}, {content_len}), extracted_data={has_extracted_data}, text={has_text}")
+            
+            logger.info(f"===== End document diagnostic information =====")
+            
+            # Prepare documents for Claude API
             user_content = []
             
-            # Add all prepared documents to the message content
-            for prepared_doc in prepared_documents:
-                user_content.append(prepared_doc)
+            # Import the repository to get document binary content if needed
+            try:
+                from repositories.document_repository import DocumentRepository
+                from utils.database import get_db
+                
+                # Create a repository instance to fetch binary data if needed
+                repository = None
+                async for db in get_db():
+                    repository = DocumentRepository(db)
+                    break  # Just get the first one
+                
+                if repository:
+                    logger.info("Successfully created document repository for binary access")
+                else:
+                    logger.warning("Could not create document repository - no database connection available")
+            except Exception as repo_error:
+                logger.warning(f"Could not create document repository for binary access: {str(repo_error)}")
+                repository = None
+
+            # Process each document
+            for i, doc in enumerate(documents):
+                doc_id = doc.get('id', f'doc_{i}')
+                doc_title = doc.get("title", doc.get("filename", f"Document {doc_id}"))
+                
+                # Check if this is a PDF document
+                is_pdf = False
+                if doc.get("mime_type") == "application/pdf" or doc.get("document_type") == "application/pdf" or (doc.get("filename", "").lower().endswith(".pdf")):
+                    is_pdf = True
+
+                # For PDFs, try to get binary content
+                if is_pdf:
+                    pdf_binary = None
+                    
+                    # First check if binary content is already in the document
+                    if "content" in doc and isinstance(doc.get("content"), bytes):
+                        pdf_binary = doc.get("content")
+                        logger.info(f"Using existing binary content for PDF document {doc_id}: {len(pdf_binary)} bytes")
+                    
+                    # If not, try to get it from repository
+                    elif repository:
+                        try:
+                            pdf_content = await repository.get_document_content(doc_id)
+                            if pdf_content and "content" in pdf_content and isinstance(pdf_content["content"], bytes):
+                                pdf_binary = pdf_content["content"]
+                                logger.info(f"Retrieved binary PDF data ({len(pdf_binary)} bytes) for document {doc_id}")
+                        except Exception as e:
+                            logger.warning(f"Could not retrieve binary data for document {doc_id}: {str(e)}")
+                    
+                    # If we have binary PDF data, encode it as base64 for Claude
+                    if pdf_binary:
+                        try:
+                            import base64
+                            base64_data = base64.b64encode(pdf_binary).decode('utf-8')
+                            
+                            # Create the document block in Claude's format
+                            pdf_doc = {
+                                "type": "document",
+                                "title": doc_title,
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": base64_data
+                                }
+                            }
+                            
+                            user_content.append(pdf_doc)
+                            logger.info(f"Added PDF document {doc_id} with base64 encoding to content")
+                            continue
+                        except Exception as e:
+                            logger.error(f"Error encoding PDF as base64: {str(e)}")
+                
+                # For non-PDF documents or if PDF processing failed, fallback to text
+                # Try to find content in various possible locations
+                doc_content = None
+                
+                # Look for content in various fields with fallbacks
+                if "raw_text" in doc and doc["raw_text"]:
+                    doc_content = doc["raw_text"]
+                    logger.info(f"Using raw_text field for document {doc_id}")
+                elif "content" in doc and doc["content"] and isinstance(doc["content"], str):
+                    doc_content = doc["content"]
+                    logger.info(f"Using content field for document {doc_id}")
+                elif "extracted_data" in doc and isinstance(doc["extracted_data"], dict) and "raw_text" in doc["extracted_data"]:
+                    doc_content = doc["extracted_data"]["raw_text"]
+                    logger.info(f"Using extracted_data.raw_text for document {doc_id}")
+                elif "text" in doc and doc["text"]:
+                    doc_content = doc["text"]
+                    logger.info(f"Using text field for document {doc_id}")
+                
+                # If content was found, create a document block for Claude
+                if doc_content and len(str(doc_content).strip()) > 0:
+                    # Ensure content is a string
+                    if not isinstance(doc_content, str):
+                        try:
+                            doc_content = str(doc_content)
+                        except Exception as e:
+                            logger.warning(f"Could not convert content to string: {e}")
+                            continue
+                    
+                    # Create the document block
+                    text_doc = {
+                        "type": "document",
+                        "title": doc_title,
+                        "source": {
+                            "type": "text",
+                            "media_type": "text/plain",
+                            "data": doc_content
+                        }
+                    }
+                    
+                    user_content.append(text_doc)
+                    logger.info(f"Added text document {doc_id} with {len(doc_content)} chars to content")
+                else:
+                    logger.warning(f"Could not find any content for document {doc_id}, skipping")
+            
+            # If no documents were prepared, return an error message
+            if not any(item.get("type") == "document" for item in user_content):
+                logger.warning("No documents were prepared for the Claude API")
+                return {
+                    "content": "I couldn't process the document content. Please ensure the documents were properly uploaded and contain readable text.",
+                    "citations": []
+                }
             
             # Add the question as a text block
             user_content.append({"type": "text", "text": question})
             
-            # Create messages in dictionary format expected by Claude
-            messages = [
-                {
-                    "role": "system", 
-                    "content": "You are a financial document analysis assistant that provides precise answers with citations. When answering questions: 1. Focus on information directly from the provided documents 2. Use citations to support your statements 3. Provide specific financial data from the documents where relevant 4. If a question cannot be answered from the documents, clearly state that 5. Be precise and factual in your analysis."
-                },
-                {
-                    "role": "user",
-                    "content": user_content
-                }
-            ]
+            # Create the system prompt
+            system_message = "You are a financial document analysis assistant that provides precise answers with citations. When answering questions: 1. Focus on information directly from the provided documents 2. Use citations to support your statements 3. Provide specific financial data from the documents where relevant 4. If a question cannot be answered from the documents, clearly state that 5. Be precise and factual in your analysis."
+            
+            # Format messages for Anthropic API
+            anthropic_messages = []
             
             # Add conversation history if provided
             if conversation_history:
-                history_messages = []
                 for msg in conversation_history:
                     role = msg.get("role", "").lower()
                     content = msg.get("content", "")
                     
                     # Map roles to Claude's expected format
                     if role in ["user", "human"]:
-                        history_messages.append({"role": "user", "content": content})
+                        anthropic_messages.append({"role": "user", "content": content})
                     elif role in ["assistant", "ai"]:
-                        history_messages.append({"role": "assistant", "content": content})
+                        anthropic_messages.append({"role": "assistant", "content": content})
+            
+            # Add current message with documents and question
+            anthropic_messages.append({
+                "role": "user",
+                "content": user_content
+            })
+            
+            # Log the API call
+            logger.info(f"Calling Anthropic API with {len(anthropic_messages)} messages and {len([item for item in user_content if item.get('type') == 'document'])} documents")
+            
+            # Use a model that supports citations
+            model_name = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+            logger.info(f"Using Claude model: {model_name}")
+            
+            # Create the Anthropic client
+            from anthropic import Anthropic
+            anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+            
+            # Call the API
+            try:
+                response = anthropic_client.messages.create(
+                    model=model_name,
+                    system=system_message,
+                    messages=anthropic_messages,
+                    max_tokens=4000
+                )
                 
-                # Insert history before the current user message (if any)
-                if history_messages:
-                    messages = [messages[0]] + history_messages + [messages[-1]]
-            
-            # Call the API with the properly formatted messages
-            logger.info(f"Calling Claude API with {len(messages)} messages")
-            response = self.llm.invoke(messages)
-            
-            # Process citation data from response
-            response_content = ""
-            citations = []
-            
-            if hasattr(response, 'content'):
-                # Check if content is a list (structured response with citations)
-                if isinstance(response.content, list):
-                    # Extract text from content blocks
-                    response_content = self._process_response_with_citations(response.content)
-                    # Extract citations from content blocks
-                    citations = self._extract_citations_from_response(response)
-                else:
-                    # Handle simple string response
-                    response_content = str(response.content)
-            else:
-                # Fallback for unexpected response format
-                response_content = str(response)
-            
-            logger.info(f"Generated response with {len(citations)} citations")
-            
-            return {
-                "content": response_content,
-                "citations": citations
-            }
-            
+                # Process the response
+                ai_response = response.content[0].text
+                logger.info(f"Claude API response received: {len(ai_response)} characters")
+                
+                # Extract and format citations
+                citations = self._process_citations_from_response(response, ai_response)
+                
+                return {
+                    "content": ai_response,
+                    "citations": citations
+                }
+            except Exception as api_error:
+                logger.error(f"Error calling Claude API: {str(api_error)}", exc_info=True)
+                return {
+                    "content": f"An error occurred while processing your request: {str(api_error)}",
+                    "citations": []
+                }
         except Exception as e:
             logger.error(f"Error in simple_document_qa: {str(e)}", exc_info=True)
             return {
-                "content": "I'm sorry, I couldn't process your question due to a technical issue.",
+                "content": f"An error occurred while processing your request: {str(e)}",
                 "citations": []
             }
     
@@ -860,153 +1248,180 @@ class LangGraphService:
                 full_text += block
                 
         return full_text
-        
-    def _extract_citations_from_response(self, response) -> List[Dict[str, Any]]:
-        """
-        Extract and process citations from Anthropic response.
-        
-        Args:
-            response: The response from Anthropic API
-            
-        Returns:
-            List of citation dictionaries
-        """
+    
+    def _extract_citations_from_response(self, response):
+        """Extract citation data from Claude API response."""
         citations = []
         
-        # Check if response has content
-        if not hasattr(response, 'content'):
-            logger.warning("Response does not have 'content' attribute")
-            return citations
-            
-        content = response.content
-        logger.info(f"Response content type: {type(content)}")
+        if hasattr(response, 'content') and isinstance(response.content, list):
+            for block in response.content:
+                if isinstance(block, dict) and block.get('type') == 'text':
+                    # Extract any citation annotations
+                    annotations = block.get('annotations', [])
+                    for annotation in annotations:
+                        if annotation.get('type') == 'citation':
+                            # Process citation
+                            citation_data = annotation.get('citation', {})
+                            
+                            # Determine citation type and extract appropriate fields
+                            if 'document' in citation_data:
+                                doc_idx = citation_data.get('document', {}).get('index', 0)
+                                doc_id = f"doc_{doc_idx}"
+                                text = citation_data.get('text', '')
+                                
+                                citations.append({
+                                    "document_index": doc_idx,
+                                    "document_id": doc_id,
+                                    "text": text
+                                })
         
-        # Dump the raw response for debugging if it's not too large
-        if isinstance(content, list) and len(content) < 10:
-            try:
-                logger.info(f"Raw response content: {str(content)[:500]}...")
-            except:
-                logger.info("Could not convert raw response to string")
-        
-        # If content is not a list, return empty citations
-        if not isinstance(content, list):
-            logger.warning(f"Content is not a list: {type(content)}")
-            return citations
-            
-        logger.info(f"Content has {len(content)} blocks")
-        
-        # Process each content block
-        for i, block in enumerate(content):
-            logger.info(f"Processing content block {i}: {type(block)}")
-            
-            # Dump the raw block for debugging
-            try:
-                if isinstance(block, dict):
-                    logger.info(f"Block {i} keys: {block.keys()}")
-                    for key in block.keys():
-                        logger.info(f"Block {i} - {key}: {type(block[key])}")
-                        if key == 'citations' and block[key]:
-                            logger.info(f"Block {i} has {len(block[key])} citations")
-                            for j, citation in enumerate(block[key]):
-                                logger.info(f"Citation {j} type: {type(citation)}")
-                                if isinstance(citation, dict):
-                                    logger.info(f"Citation {j} keys: {citation.keys()}")
-                else:
-                    logger.info(f"Block {i} attributes: {dir(block)[:100]}...")
-            except Exception as e:
-                logger.error(f"Error examining block {i}: {str(e)}")
-            
-            # Handle different ways citations might be present
-            if isinstance(block, dict):
-                # Check for citations in dict format
-                if 'citations' in block and block['citations']:
-                    logger.info(f"Found {len(block['citations'])} citations in block {i}")
-                    for citation in block['citations']:
-                        citation_dict = self._convert_citation_from_dict(citation)
-                        if citation_dict and citation_dict not in citations:
-                            citations.append(citation_dict)
-                # Also check for text to log what we're finding
-                if 'text' in block:
-                    logger.info(f"Found text in block {i}: {block['text'][:50]}...")
-            
-            # Check for citations as an attribute
-            elif hasattr(block, 'citations') and block.citations:
-                logger.info(f"Found citations attribute in block {i}")
-                for citation in block.citations:
-                    citation_dict = self._convert_citation_to_dict(citation)
-                    if citation_dict and citation_dict not in citations:
-                        citations.append(citation_dict)
-        
-        logger.info(f"Extracted {len(citations)} citations from response")
         return citations
     
-    def _convert_citation_from_dict(self, citation) -> Dict[str, Any]:
-        """Convert citation from dictionary format."""
+    def _process_citations_from_response(self, response, ai_response: str) -> List[Dict[str, Any]]:
+        """
+        Process and extract citations from the Claude API response.
+        Returns a list of citation objects in a standardized format.
+        
+        Args:
+            response: The direct Anthropic API response
+            ai_response: The text content from the response
+            
+        Returns:
+            List of standardized citation dictionaries
+        """
         try:
-            citation_dict = {
-                "type": citation.get("type", "unknown"),
-                "cited_text": citation.get("cited_text", ""),
-                "document_title": citation.get("document_title", "")
-            }
+            # Initialize empty list for citations
+            citations = []
             
-            # Add type-specific fields
-            if citation_dict["type"] == "char_location":
-                citation_dict.update({
-                    "start_char_index": citation.get("start_char_index", 0),
-                    "end_char_index": citation.get("end_char_index", 0),
-                    "document_index": citation.get("document_index", 0)
-                })
-            elif citation_dict["type"] == "page_location":
-                citation_dict.update({
-                    "start_page_number": citation.get("start_page_number", 1),
-                    "end_page_number": citation.get("end_page_number", 1),
-                    "document_index": citation.get("document_index", 0)
-                })
-            elif citation_dict["type"] == "content_block_location":
-                citation_dict.update({
-                    "start_block_index": citation.get("start_block_index", 0),
-                    "end_block_index": citation.get("end_block_index", 0),
-                    "document_index": citation.get("document_index", 0)
-                })
+            # Check if response has content blocks
+            if hasattr(response, 'content') and response.content:
+                # Process each content block
+                for block in response.content:
+                    # Check for citations directly in the content block
+                    if hasattr(block, 'citations') and block.citations:
+                        logger.info(f"Found {len(block.citations)} citations in content block")
+                        
+                        for citation in block.citations:
+                            # Process each citation
+                            citation_dict = self._convert_citation_to_dict(citation)
+                            if citation_dict:
+                                citations.append(citation_dict)
+                    
+                    # Check for citations in annotations
+                    if hasattr(block, 'annotations') and block.annotations:
+                        logger.info(f"Found {len(block.annotations)} annotations in content block")
+                        
+                        for annotation in block.annotations:
+                            if hasattr(annotation, 'citations') and annotation.citations:
+                                for citation in annotation.citations:
+                                    citation_dict = self._convert_citation_to_dict(citation)
+                                    if citation_dict:
+                                        citations.append(citation_dict)
             
-            return citation_dict
+            # Check for top-level citations (older API format)
+            if hasattr(response, 'citations') and response.citations:
+                logger.info(f"Found {len(response.citations)} top-level citations in response")
+                
+                for citation in response.citations:
+                    citation_dict = self._convert_citation_to_dict(citation)
+                    if citation_dict:
+                        citations.append(citation_dict)
+            
+            # Check for top-level annotations (older API format)
+            if hasattr(response, 'annotations') and response.annotations:
+                logger.info(f"Found {len(response.annotations)} top-level annotations in response")
+                
+                for annotation in response.annotations:
+                    if hasattr(annotation, 'citations') and annotation.citations:
+                        for citation in annotation.citations:
+                            citation_dict = self._convert_citation_to_dict(citation)
+                            if citation_dict:
+                                citations.append(citation_dict)
+            
+            # Log citation count
+            if citations:
+                logger.info(f"Extracted {len(citations)} citations from the Claude API response")
+                
+                # Log first citation as an example
+                if len(citations) > 0:
+                    logger.info(f"Example citation: {citations[0]}")
+            else:
+                logger.info("No citations found in the Claude API response")
+            
+            return citations
+            
         except Exception as e:
-            logger.error(f"Error converting citation dictionary: {str(e)}")
-            return {}
+            logger.error(f"Error processing citations from response: {str(e)}", exc_info=True)
+            return []
     
     def _convert_citation_to_dict(self, citation) -> Dict[str, Any]:
-        """Convert Claude citation object to dictionary format for our app."""
+        """
+        Convert a citation object from the Anthropic API to our standardized dictionary format.
+        
+        Args:
+            citation: Citation object from Anthropic API
+            
+        Returns:
+            Standardized citation dictionary
+        """
         try:
+            # Determine citation type
+            citation_type = getattr(citation, 'type', None)
+            if not citation_type and hasattr(citation, 'page'):
+                citation_type = "page_location"
+            elif not citation_type and (hasattr(citation, 'start_index') or hasattr(citation, 'start_char_index')):
+                citation_type = "char_location"
+            else:
+                citation_type = "standard"
+            
+            # Extract document information
+            document_id = None
+            if hasattr(citation, 'document'):
+                # Extract ID from document object
+                document_id = getattr(citation.document, 'id', None)
+                if document_id is None and hasattr(citation.document, 'index'):
+                    document_id = f"doc_{citation.document.index}"
+            
+            # Extract quoted text
+            quoted_text = ""
+            if hasattr(citation, 'text'):
+                quoted_text = citation.text
+            elif hasattr(citation, 'quote'):
+                quoted_text = citation.quote
+            
+            # Base citation information
             citation_dict = {
-                "type": getattr(citation, "type", "unknown"),
-                "cited_text": getattr(citation, "cited_text", ""),
-                "document_title": getattr(citation, "document_title", "")
+                "type": citation_type,
+                "cited_text": quoted_text,
+                "document_id": document_id
             }
             
             # Add type-specific fields
-            if citation_dict["type"] == "char_location":
+            if citation_type == "page_location" and hasattr(citation, 'page'):
+                # For PDF page citations
+                start_page = getattr(citation.page, 'start', 1)
+                end_page = getattr(citation.page, 'end', start_page)
+                
                 citation_dict.update({
-                    "start_char_index": getattr(citation, "start_char_index", 0),
-                    "end_char_index": getattr(citation, "end_char_index", 0),
-                    "document_index": getattr(citation, "document_index", 0)
+                    "start_page_number": start_page,
+                    "end_page_number": end_page
                 })
-            elif citation_dict["type"] == "page_location":
+            elif citation_type == "char_location":
+                # For character-based citations
+                start_index = getattr(citation, 'start_index', 
+                                     getattr(citation, 'start_char_index', 0))
+                end_index = getattr(citation, 'end_index',
+                                   getattr(citation, 'end_char_index', 0))
+                
                 citation_dict.update({
-                    "start_page_number": getattr(citation, "start_page_number", 1),
-                    "end_page_number": getattr(citation, "end_page_number", 1),
-                    "document_index": getattr(citation, "document_index", 0)
-                })
-            elif citation_dict["type"] == "content_block_location":
-                citation_dict.update({
-                    "start_block_index": getattr(citation, "start_block_index", 0),
-                    "end_block_index": getattr(citation, "end_block_index", 0),
-                    "document_index": getattr(citation, "document_index", 0)
+                    "start_char_index": start_index,
+                    "end_char_index": end_index
                 })
             
             return citation_dict
         except Exception as e:
-            logger.error(f"Error converting citation: {str(e)}", exc_info=True)
-            return {}
+            logger.error(f"Error converting citation to dictionary: {str(e)}", exc_info=True)
+            return {"type": "unknown", "cited_text": str(citation), "error": str(e)}
     
     async def transition_to_full_graph(
         self,
@@ -1040,7 +1455,7 @@ class LangGraphService:
         # Create metadata for the checkpoint
         metadata = {
             "conversation_id": conversation_id,
-            "timestamp": datetime.datetime.now().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "type": "transition_to_full_graph"
         }
         
@@ -1053,3 +1468,56 @@ class LangGraphService:
         # Return the thread ID for future reference
         logger.info(f"Transitioned conversation {conversation_id} to full graph execution")
         return thread_id
+    
+    def _monitor_memory_usage(self, operation: str = "general") -> float:
+        """
+        Monitor and log memory usage at various points in document processing.
+        Returns current memory usage in MB.
+        """
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        logger.info(f"Memory usage ({operation}): {memory_mb:.2f} MB")
+        return memory_mb
+        
+    def _optimize_memory_if_needed(self, current_memory_mb: float, threshold_mb: float = 1000) -> None:
+        """
+        Perform memory optimization if current usage exceeds threshold.
+        
+        Args:
+            current_memory_mb: Current memory usage in MB
+            threshold_mb: Threshold in MB above which optimization will be performed
+        """
+        if current_memory_mb > threshold_mb:
+            logger.warning(f"Memory usage ({current_memory_mb:.2f} MB) exceeds threshold ({threshold_mb} MB). Running garbage collection.")
+            
+            # Get memory before optimization
+            before_gc = self._monitor_memory_usage("before_gc")
+            
+            # Force garbage collection
+            gc.collect()
+            
+            # Get memory after optimization
+            after_gc = self._monitor_memory_usage("after_gc")
+            
+            # Log memory savings
+            memory_freed = before_gc - after_gc
+            logger.info(f"Garbage collection freed {memory_freed:.2f} MB of memory")
+    
+    def _create_empty_state(self) -> AgentState:
+        """
+        Create an empty conversation state.
+        
+        Returns:
+            Empty conversation state
+        """
+        return {
+            "conversation_id": "",
+            "messages": [],
+            "documents": [],
+            "citations": [],
+            "active_documents": [],
+            "current_message": None,
+            "current_response": None,
+            "citations_used": [],
+            "context": {}
+        }

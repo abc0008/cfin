@@ -42,75 +42,56 @@ class ChartType(str, Enum):
     SCATTER = "scatter"
 
 # Tool definitions
-class CalculateRatioInput(BaseModel):
-    """Input for calculating financial ratios."""
-    ratio_name: str = Field(description="Name of the ratio to calculate (e.g., 'Current Ratio', 'Debt-to-Equity')")
-    numerator_value: float = Field(description="Value for the numerator")
-    denominator_value: float = Field(description="Value for the denominator")
-    description: Optional[str] = Field(description="Description of what this ratio represents", default=None)
-
-class GenerateChartInput(BaseModel):
-    """Input for generating chart data."""
-    chart_type: ChartType = Field(description="Type of chart to generate")
-    x_axis_label: str = Field(description="Label for the X axis")
-    y_axis_label: str = Field(description="Label for the Y axis")
-    data_series: List[Dict[str, Any]] = Field(description="Data series to plot")
-    title: str = Field(description="Chart title")
-
-class ExtractFinancialFactInput(BaseModel):
-    """Input for extracting financial facts."""
-    topic: str = Field(description="Financial topic to extract facts about (e.g., 'Revenue', 'Expenses')")
-    time_period: Optional[str] = Field(description="Specific time period to focus on", default=None)
-
-class FinancialTrend(BaseModel):
-    """Financial trend structure."""
-    metric: str = Field(description="The financial metric (e.g., 'Revenue', 'Profit Margin')")
-    values: List[float] = Field(description="The values of the metric over time")
-    periods: List[str] = Field(description="The time periods corresponding to the values")
-    growth_rate: float = Field(description="The overall growth rate")
-    trend_direction: str = Field(description="Direction of the trend ('up', 'down', or 'stable')")
-
 class FinancialTools:
     """Tools for financial analysis."""
     
     @tool("calculate_financial_ratio")
-    def calculate_financial_ratio(self, input_data: CalculateRatioInput) -> Dict[str, Any]:
+    def calculate_financial_ratio(self, ratio_name: str, numerator_value: float, denominator_value: float, description: Optional[str] = None) -> Dict[str, Any]:
         """
         Calculate a financial ratio from numerator and denominator values.
         Provides ratio result and interpretation.
+        
+        Args:
+            ratio_name: Name of the ratio to calculate (e.g., 'Current Ratio', 'Debt-to-Equity')
+            numerator_value: Value for the numerator
+            denominator_value: Value for the denominator
+            description: Description of what this ratio represents (optional)
+            
+        Returns:
+            Dictionary containing ratio calculation results and interpretation
         """
         try:
-            ratio_value = input_data.numerator_value / input_data.denominator_value
+            ratio_value = numerator_value / denominator_value
             
             # Default description if none provided
-            description = input_data.description
+            description = description
             if not description:
-                if "current" in input_data.ratio_name.lower():
+                if "current" in ratio_name.lower():
                     description = "Measures the company's ability to pay short-term obligations"
-                elif "debt" in input_data.ratio_name.lower() and "equity" in input_data.ratio_name.lower():
+                elif "debt" in ratio_name.lower() and "equity" in ratio_name.lower():
                     description = "Measures the company's financial leverage"
-                elif "profit" in input_data.ratio_name.lower() or "margin" in input_data.ratio_name.lower():
+                elif "profit" in ratio_name.lower() or "margin" in ratio_name.lower():
                     description = "Measures the company's profitability as a percentage of revenue"
                 else:
-                    description = f"The {input_data.ratio_name} financial metric"
+                    description = f"The {ratio_name} financial metric"
             
             # Simple interpretation based on common ratios
             interpretation = ""
-            if "current" in input_data.ratio_name.lower():
+            if "current" in ratio_name.lower():
                 if ratio_value < 1:
                     interpretation = "Current ratio below 1 indicates potential liquidity issues."
                 elif ratio_value < 2:
                     interpretation = "Current ratio between 1-2 is generally acceptable but could be better."
                 else:
                     interpretation = "Current ratio above 2 indicates strong liquidity position."
-            elif "debt" in input_data.ratio_name.lower() and "equity" in input_data.ratio_name.lower():
+            elif "debt" in ratio_name.lower() and "equity" in ratio_name.lower():
                 if ratio_value < 0.5:
                     interpretation = "Low debt-to-equity ratio indicates conservative financing."
                 elif ratio_value < 1.5:
                     interpretation = "Moderate debt-to-equity ratio indicating balanced financing."
                 else:
                     interpretation = "High debt-to-equity ratio indicates higher financial risk."
-            elif "profit" in input_data.ratio_name.lower() or "margin" in input_data.ratio_name.lower():
+            elif "profit" in ratio_name.lower() or "margin" in ratio_name.lower():
                 if ratio_value < 0.05:
                     interpretation = "Low profit margin indicating potential profitability issues."
                 elif ratio_value < 0.15:
@@ -119,49 +100,49 @@ class FinancialTools:
                     interpretation = "High profit margin indicating strong profitability."
             
             return {
-                "ratio_name": input_data.ratio_name,
+                "ratio_name": ratio_name,
                 "value": round(ratio_value, 4),
                 "description": description,
                 "interpretation": interpretation,
-                "numerator": input_data.numerator_value,
-                "denominator": input_data.denominator_value
+                "numerator": numerator_value,
+                "denominator": denominator_value
             }
         except ZeroDivisionError:
-            raise ToolException(f"Cannot calculate {input_data.ratio_name}: division by zero")
+            raise ToolException(f"Cannot calculate {ratio_name}: division by zero")
         except Exception as e:
             raise ToolException(f"Error calculating ratio: {str(e)}")
     
     @tool("generate_chart_data")
-    def generate_chart_data(self, input_data: GenerateChartInput) -> Dict[str, Any]:
+    def generate_chart_data(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate data for financial charts and visualizations.
         Returns structured data that can be used by charting libraries.
         """
         try:
             chart_data = {
-                "type": input_data.chart_type,
-                "title": input_data.title,
-                "x_axis": input_data.x_axis_label,
-                "y_axis": input_data.y_axis_label,
-                "data": input_data.data_series
+                "type": input_data["chart_type"],
+                "title": input_data["title"],
+                "x_axis": input_data["x_axis_label"],
+                "y_axis": input_data["y_axis_label"],
+                "data": input_data["data_series"]
             }
             
             # Add chart-specific properties
-            if input_data.chart_type == ChartType.PIE:
-                chart_data["total"] = sum(item.get("value", 0) for item in input_data.data_series)
+            if input_data["chart_type"] == ChartType.PIE:
+                chart_data["total"] = sum(item.get("value", 0) for item in input_data["data_series"])
                 chart_data["data"] = [
                     {
                         "name": item.get("name", ""),
                         "value": item.get("value", 0),
                         "percentage": (item.get("value", 0) / chart_data["total"]) * 100 if chart_data["total"] > 0 else 0
                     }
-                    for item in input_data.data_series
+                    for item in input_data["data_series"]
                 ]
             
-            if input_data.chart_type in [ChartType.LINE, ChartType.BAR, ChartType.AREA]:
+            if input_data["chart_type"] in [ChartType.LINE, ChartType.BAR, ChartType.AREA]:
                 # Organize time series data
-                periods = sorted(set(item.get("period") for item in input_data.data_series if "period" in item))
-                series_names = sorted(set(item.get("series") for item in input_data.data_series if "series" in item))
+                periods = sorted(set(item.get("period") for item in input_data["data_series"] if "period" in item))
+                series_names = sorted(set(item.get("series") for item in input_data["data_series"] if "series" in item))
                 
                 if periods and series_names:
                     formatted_data = []
@@ -169,7 +150,7 @@ class FinancialTools:
                         entry = {"period": period}
                         for series in series_names:
                             value = next(
-                                (item.get("value", 0) for item in input_data.data_series 
+                                (item.get("value", 0) for item in input_data["data_series"] 
                                  if item.get("period") == period and item.get("series") == series), 
                                 0
                             )
@@ -184,7 +165,7 @@ class FinancialTools:
             raise ToolException(f"Error generating chart data: {str(e)}")
     
     @tool("analyze_financial_trend")
-    def analyze_financial_trend(self, data: List[Dict[str, Any]]) -> FinancialTrend:
+    def analyze_financial_trend(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Analyze trends in financial data over time.
         Determines growth rate and trend direction.
@@ -214,20 +195,20 @@ class FinancialTools:
             else:
                 trend_direction = "stable"
             
-            return FinancialTrend(
-                metric=metric,
-                values=values,
-                periods=periods,
-                growth_rate=round(growth_rate, 4),
-                trend_direction=trend_direction
-            )
+            return {
+                "metric": metric,
+                "values": values,
+                "periods": periods,
+                "growth_rate": round(growth_rate, 4),
+                "trend_direction": trend_direction
+            }
         except Exception as e:
             if isinstance(e, ToolException):
                 raise e
             raise ToolException(f"Error analyzing financial trend: {str(e)}")
     
     @tool("extract_financial_fact")
-    def extract_financial_fact(self, input_data: ExtractFinancialFactInput) -> Dict[str, Any]:
+    def extract_financial_fact(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Extract specific financial facts from the document.
         Returns facts related to a specific financial topic.
@@ -252,16 +233,16 @@ class FinancialTools:
             ]
         }
         
-        topic = input_data.topic.lower()
+        topic = input_data.get("topic", "").lower()
         
         if topic in facts:
-            result = {"topic": input_data.topic, "facts": facts[topic]}
-            if input_data.time_period:
+            result = {"topic": input_data.get("topic", ""), "facts": facts[topic]}
+            if input_data.get("time_period"):
                 # Filter facts by time period (in a real implementation)
-                result["time_period"] = input_data.time_period
+                result["time_period"] = input_data.get("time_period")
             return result
         else:
-            return {"topic": input_data.topic, "facts": []}
+            return {"topic": input_data.get("topic", ""), "facts": []}
 
 # Financial analysis agent
 class FinancialAnalysisAgent:
@@ -273,7 +254,7 @@ class FinancialAnalysisAgent:
             raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
         
         # Initialize LLM
-        self.model = os.getenv("CLAUDE_MODEL", "claude-3-sonnet-20240229")
+        self.model = os.getenv("CLAUDE_MODEL", "claude-3-sonnet-latest")
         self.llm = ChatAnthropic(
             model=self.model,
             temperature=0.1,
@@ -527,7 +508,7 @@ Be thorough but concise, and focus on the most important information relevant to
                     "error": str(e)
                 })
         
-        # Update the state
+        # Update the state with the current task
         new_state = state.copy()
         new_state["tools_results"] = state.get("tools_results", []) + tools_results
         
@@ -578,25 +559,30 @@ Be thorough but concise, and focus on the most important information relevant to
         
         # Add context about available analysis results
         analysis_results = state.get("analysis_results", {})
-        analysis_info = "Results from financial analysis:\n"
+        chart_data = state.get("chart_data")
+        
+        context = "Financial Analysis Results:\n"
         
         if "ratios" in analysis_results:
-            analysis_info += "Financial Ratios:\n"
+            context += "\nFinancial Ratios:\n"
             for ratio in analysis_results["ratios"]:
-                analysis_info += f"- {ratio.get('ratio_name', 'Unnamed ratio')}: {ratio.get('value', 'N/A')}\n"
+                context += f"- {ratio.get('ratio_name', 'Unnamed ratio')}: {ratio.get('value', 'N/A')}\n"
         
         if "trends" in analysis_results:
-            analysis_info += "\nFinancial Trends:\n"
+            context += "\nFinancial Trends:\n"
             for trend in analysis_results["trends"]:
-                analysis_info += f"- {trend.get('metric', 'Unnamed metric')}: {trend.get('trend_direction', 'N/A')} trend, {trend.get('growth_rate', 'N/A')} growth rate\n"
+                context += f"- {trend.get('metric', 'Unnamed metric')}: {trend.get('trend_direction', 'N/A')} trend with {trend.get('growth_rate', 'N/A')} growth rate\n"
         
-        context_message = SystemMessage(content=analysis_info)
+        context_message = SystemMessage(content=context)
         
         # Combine messages for the LLM
         combined_messages = [system_message, tools_message, context_message] + state["messages"]
         
         # Get visualization suggestion from the LLM
         vis_message = self.llm.invoke(combined_messages)
+        
+        # Update the state
+        new_state = state.copy()
         
         # Parse the visualization tools to use
         parsed_tools = []
@@ -650,7 +636,6 @@ Be thorough but concise, and focus on the most important information relevant to
                 logger.error(f"Error generating default chart: {str(e)}")
         
         # Update the state
-        new_state = state.copy()
         new_state["chart_data"] = chart_data
         
         # Add to message history

@@ -1,7 +1,9 @@
-import { Message } from '@/types';
+import { Message, Citation } from '@/types';
+import { MessageRequestSchema, ConversationCreateRequestSchema } from '@/validation/schemas';
+import { validateRequest } from '../../lib/validation/api-validation';
 
 // API base URL - would be configured based on environment
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
 
 /**
  * Conversation API service
@@ -23,7 +25,7 @@ class ConversationApiService {
     }
     
     // Fixed URL construction to prevent duplicated /api
-    const finalUrl = API_BASE_URL.endsWith('/api') || endpoint.startsWith('/api') 
+    const finalUrl = API_BASE_URL.endsWith('/api') 
       ? `${API_BASE_URL}${endpoint}`
       : `${API_BASE_URL}/api${endpoint}`;
       
@@ -103,28 +105,27 @@ class ConversationApiService {
       throw error;
     }
   }
-
+  
   /**
    * Create a new conversation
    */
-  async createConversation(data: { title: string, document_ids?: string[] }): Promise<{ session_id: string }> {
+  async createConversation(title: string = 'New Conversation', documentIds: string[] = []): Promise<{ session_id: string }> {
     try {
-      // Send request
-      const response = await this.request<any>(
-        '/conversation',
+      // Validate request data against schema
+      const validatedData = validateRequest(ConversationCreateRequestSchema, {
+        title,
+        document_ids: documentIds,
+        user_id: 'default-user' // This is handled by the backend, but we'll include it for completeness
+      });
+      
+      const response = await this.request<{ session_id: string }>(
+        `/conversation`,
         'POST',
-        data
+        validatedData
       );
       
-      // Extract the session ID from the response
-      if (response && response.session_id) {
-        return { session_id: response.session_id };
-      } else if (response && response.id) {
-        // Handle alternative response format
-        return { session_id: response.id };
-      } else {
-        throw new Error('Unexpected response format from conversation creation');
-      }
+      console.log(`Created conversation session: ${response.session_id}`);
+      return response;
     } catch (error) {
       console.error('Error creating conversation:', error);
       throw new Error(`Failed to create conversation: ${error instanceof Error ? error.message : String(error)}`);
@@ -132,22 +133,14 @@ class ConversationApiService {
   }
   
   /**
-   * List user conversations
+   * List conversations
    */
-  async listConversations(): Promise<Array<{ id: string, title: string }>> {
+  async listConversations(): Promise<any[]> {
     try {
-      // Get list of conversations for the current user
-      const response = await this.request<any[]>(
+      const conversations = await this.request<any[]>(
         '/conversation',
         'GET'
       );
-      
-      // Convert backend format to our frontend format
-      const conversations = response.map(conv => ({
-        id: conv.id || conv.session_id || conv.conversation_id,
-        title: conv.title || 'Untitled Conversation'
-      }));
-      
       return conversations;
     } catch (error) {
       console.error('Error listing conversations:', error);
@@ -160,13 +153,18 @@ class ConversationApiService {
    */
   async sendMessage(sessionId: string, message: string, documentIds: string[] = []): Promise<Message> {
     try {
+      // Validate request data against schema
+      const validatedData = validateRequest(MessageRequestSchema, {
+        session_id: sessionId,
+        content: message,
+        document_ids: documentIds,
+        user_id: 'default-user'
+      });
+      
       const response = await this.request<Message>(
         `/conversation/${sessionId}/message`,
         'POST',
-        {
-          content: message,
-          document_ids: documentIds
-        }
+        validatedData
       );
       
       return response;
@@ -179,14 +177,14 @@ class ConversationApiService {
   /**
    * Get messages for a conversation
    */
-  async getMessages(sessionId: string): Promise<Message[]> {
+  async getMessages(sessionId: string, limit: number = 50, offset: number = 0): Promise<Message[]> {
     try {
-      const response = await this.request<Message[]>(
-        `/conversation/${sessionId}/messages`,
+      const response = await this.request<{ messages: Message[] }>(
+        `/conversation/${sessionId}/history?limit=${limit}&offset=${offset}`,
         'GET'
       );
       
-      return response;
+      return response.messages;
     } catch (error) {
       console.error('Error getting messages:', error);
       return [];
@@ -194,52 +192,39 @@ class ConversationApiService {
   }
   
   /**
-   * Get a single conversation
+   * Get document citations
    */
-  async getConversation(sessionId: string): Promise<{ id: string, title: string, messages: Message[] }> {
+  async getDocumentCitations(documentId: string): Promise<Citation[]> {
     try {
-      const conversation = await this.request<any>(
-        `/conversation/${sessionId}`,
+      const citations = await this.request<Citation[]>(
+        `/document/${documentId}/citations`,
         'GET'
       );
       
-      const messages = await this.getMessages(sessionId);
-      
-      return {
-        id: conversation.id || conversation.session_id,
-        title: conversation.title || 'Untitled Conversation',
-        messages
-      };
+      return citations;
     } catch (error) {
-      console.error('Error getting conversation:', error);
-      throw new Error(`Failed to get conversation: ${error instanceof Error ? error.message : String(error)}`);
+      console.error('Error getting document citations:', error);
+      return [];
     }
   }
-  
+
   /**
-   * Create a new analysis from conversation
+   * Add a document to a conversation
    */
-  async createAnalysisFromConversation(
-    sessionId: string, 
-    documentIds: string[], 
-    analysisType: string
-  ): Promise<{ analysis_id: string }> {
+  async addDocumentToConversation(conversationId: string, documentId: string): Promise<boolean> {
     try {
-      const response = await this.request<{ analysis_id: string }>(
-        `/conversation/${sessionId}/analysis`,
-        'POST',
-        {
-          document_ids: documentIds,
-          analysis_type: analysisType
-        }
+      await this.request(
+        `/conversation/${conversationId}/document/${documentId}`,
+        'POST'
       );
-      
-      return response;
+      console.log(`Document ${documentId} added to conversation ${conversationId}`);
+      return true;
     } catch (error) {
-      console.error('Error creating analysis from conversation:', error);
-      throw new Error(`Failed to create analysis: ${error instanceof Error ? error.message : String(error)}`);
+      console.error('Error adding document to conversation:', error);
+      return false;
     }
   }
 }
 
-export const conversationApi = new ConversationApiService(); 
+// Create a singleton instance
+export const conversationApi = new ConversationApiService();

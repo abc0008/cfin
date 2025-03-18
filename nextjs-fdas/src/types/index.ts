@@ -17,7 +17,7 @@ export interface ProcessedDocument {
   confidenceScore: number;
   processingStatus: 'pending' | 'processing' | 'completed' | 'failed';
   errorMessage?: string;
-  citations?: Array<any>;
+  citations?: Array<Citation>;
 }
 
 export interface DocumentUploadResponse {
@@ -25,6 +25,24 @@ export interface DocumentUploadResponse {
   filename: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
   message: string;
+}
+
+export interface Citation {
+  id: string;
+  text: string;
+  documentId: string;
+  highlightId: string;
+  page: number;
+  rects: Array<{
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    width: number;
+    height: number;
+  }>;
+  messageId?: string;
+  analysisId?: string;
 }
 
 export interface FinancialRatio {
@@ -53,7 +71,7 @@ export interface Message {
   referencedDocuments: string[];
   referencedAnalyses: string[];
   citationLinks?: string[];
-  citations?: Array<any>;
+  citations?: Array<Citation>;
 }
 
 export interface ConversationState {
@@ -63,4 +81,25 @@ export interface ConversationState {
   currentFocus?: string;
   userPreferences: Record<string, any>;
   lastUpdated: string;
-} 
+}
+
+export interface AnalysisResult {
+  id: string;
+  documentIds: string[];
+  analysisType: string;
+  timestamp: string;
+  metrics: FinancialMetric[];
+  ratios: FinancialRatio[];
+  insights: string[];
+  visualizationData: Record<string, any>;
+}
+
+export interface ConversationMetadata {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  documentIds: string[];
+  messageCount: number;
+  session_id?: string; // For backward compatibility with backend response
+}

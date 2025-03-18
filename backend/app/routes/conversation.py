@@ -358,7 +358,7 @@ async def delete_conversation(
             detail=f"Error deleting conversation: {str(e)}"
         )
 
-@router.post("/{conversation_id}/documents/{document_id}", status_code=status.HTTP_200_OK)
+@router.post("/{conversation_id}/document/{document_id}", status_code=status.HTTP_200_OK)
 async def add_document_to_conversation(
     conversation_id: str,
     document_id: str,
@@ -421,7 +421,7 @@ async def add_document_to_conversation(
             detail=f"Error adding document to conversation: {str(e)}"
         )
 
-@router.get("/{conversation_id}/documents", response_model=List[Dict[str, Any]])
+@router.get("/{conversation_id}/document", response_model=List[Dict[str, Any]])
 async def get_conversation_documents(
     conversation_id: str,
     conversation_service: ConversationService = Depends(get_conversation_service),
@@ -471,7 +471,7 @@ async def get_conversation_documents(
             detail=f"Error getting conversation documents: {str(e)}"
         )
 
-@router.delete("/{conversation_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{conversation_id}/document/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_document_from_conversation(
     conversation_id: str,
     document_id: str,

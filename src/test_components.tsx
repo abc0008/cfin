@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { UploadForm } from './components/UploadForm';
 import { DocumentList } from './components/DocumentList';
 import PDFViewer from './components/PDFViewer';
-import { ProcessedDocument } from './types';
+import { ProcessedDocument, DocumentMetadata } from './types';
 
 export function TestComponents() {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
@@ -76,8 +76,10 @@ export function TestComponents() {
           <div className="border rounded-md" style={{ height: '600px' }}>
             <PDFViewer 
               document={{ 
-                metadata: { id: selectedDocumentId } as any
-              } as any}
+                metadata: { 
+                  id: selectedDocumentId 
+                } as DocumentMetadata
+              } as ProcessedDocument}
             />
           </div>
         </div>
@@ -86,4 +88,4 @@ export function TestComponents() {
   );
 }
 
-export default TestComponents; 
+export default TestComponents;

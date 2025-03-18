@@ -1,22 +1,27 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { Message } from '@/types';
+import { Message, Citation } from '@/types';
 import { conversationApi } from '@/lib/api/conversation';
 import { Loader2, Send, FileText } from 'lucide-react';
+import { MessageRenderer } from './MessageRenderer';
 
 interface ChatInterfaceProps {
   messages: Message[];
   onSendMessage: (message: string) => Promise<void>;
   activeDocuments?: string[];
   isLoading?: boolean;
+  onCitationClick?: (citation: Citation) => void;
+  onNavigateToHighlight?: (citation: Citation) => void;
 }
 
 export function ChatInterface({ 
   messages, 
   onSendMessage,
   activeDocuments = [],
-  isLoading = false 
+  isLoading = false,
+  onCitationClick,
+  onNavigateToHighlight
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -66,6 +71,51 @@ export function ChatInterface({
     }
   };
 
+  const handleCitationClick = (citation: Citation) => {
+    if (!activeDocuments) return;
+    
+    // Navigate to the citation in the document
+    if (onNavigateToHighlight && citation.rects && citation.rects.length > 0) {
+      onNavigateToHighlight(citation);
+    }
+  };
+
+  const renderMessage = (message: Message) => {
+    // Special case for loading message
+    if (message.role === 'system' && message.content === 'AI is thinking...') {
+      return (
+        <div key={message.id} className="flex justify-start">
+          <div className="max-w-[80%] rounded-lg px-4 py-2 bg-gray-100 text-gray-900 flex items-center">
+            <Loader2 className="h-5 w-5 text-indigo-600 animate-spin mr-2" />
+            <span>Analyzing document...</span>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div 
+        key={message.id} 
+        className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} mb-4`}
+      >
+        <div 
+          className={`max-w-[80%] rounded-lg px-4 py-3 ${
+            message.role === 'user' 
+              ? 'bg-indigo-600 text-white' 
+              : message.role === 'system' 
+                ? 'bg-gray-100 text-gray-900 italic' 
+                : 'bg-white border border-gray-200 text-gray-900'
+          }`}
+        >
+          <MessageRenderer 
+            message={message} 
+            onCitationClick={handleCitationClick}
+          />
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col h-full">
       <div className="p-4 border-b">
@@ -105,39 +155,7 @@ export function ChatInterface({
             </div>
           </div>
         ) : (
-          messages.map((message) => (
-            <div 
-              key={message.id} 
-              className={`flex ${
-                message.role === 'user' ? 'justify-end' : 'justify-start'
-              }`}
-            >
-              <div 
-                className={`max-w-[80%] rounded-lg p-3 ${
-                  message.role === 'user' 
-                    ? 'bg-blue-500 text-white rounded-br-none' 
-                    : message.role === 'assistant'
-                    ? 'bg-white border rounded-bl-none' 
-                    : 'bg-gray-200 w-full text-center text-sm italic'
-                }`}
-              >
-                {message.content.split('\n').map((line, i) => (
-                  <p key={i} className={i > 0 ? 'mt-2' : ''}>
-                    {line}
-                  </p>
-                ))}
-                
-                {/* Show document references if any */}
-                {message.referencedDocuments && message.referencedDocuments.length > 0 && (
-                  <div className="mt-2 text-xs pt-2 border-t border-gray-200">
-                    <p className={`${message.role === 'user' ? 'text-blue-100' : 'text-gray-500'}`}>
-                      Referenced documents: {message.referencedDocuments.length}
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))
+          messages.map((message) => renderMessage(message))
         )}
         {isLoading && (
           <div className="flex justify-start">
@@ -188,4 +206,4 @@ export function ChatInterface({
       </div>
     </div>
   );
-} 
+}

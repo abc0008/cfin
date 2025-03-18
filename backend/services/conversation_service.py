@@ -1,16 +1,16 @@
 import os
-import logging
-import json
 import uuid
+import json
+import logging
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 import asyncio
 
 from repositories.conversation_repository import ConversationRepository
 from repositories.document_repository import DocumentRepository
 from repositories.analysis_repository import AnalysisRepository
 from pdf_processing.claude_service import ClaudeService
-from models.database_models import Message, Conversation, Document, Citation, AnalysisBlock
+from models.database_models import Message, Conversation, Document, Citation, AnalysisBlock, User
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class ConversationService:
     """Service for managing conversations and messages."""
     
     def __init__(
-        self,
+        self, 
         conversation_repository: ConversationRepository,
         document_repository: DocumentRepository,
         analysis_repository: Optional[AnalysisRepository] = None
@@ -254,12 +254,92 @@ class ConversationService:
         # Format documents for context
         formatted_documents = []
         for doc in documents:
-            formatted_documents.append({
-                "id": doc.id,
-                "filename": doc.filename,
-                "document_type": doc.document_type.value if doc.document_type else "other",
-                "upload_timestamp": doc.upload_timestamp.isoformat()
-            })
+            try:
+                # Check if doc is a dictionary or an ORM object
+                doc_id = doc["id"] if isinstance(doc, dict) else doc.id
+                
+                # Get document content for citation processing
+                content_obj = await self.document_repository.get_document_content(doc_id)
+                content_data = None
+                raw_text = None
+                extracted_data = None
+                
+                # Extract content and raw text from the dictionary returned by repository
+                if content_obj and isinstance(content_obj, dict):
+                    content_data = content_obj.get("content")
+                    raw_text = content_obj.get("raw_text")
+                    extracted_data = content_obj.get("extracted_data")
+                    
+                    content_size = len(content_data) if content_data and isinstance(content_data, (str, bytes)) else 0
+                    raw_text_size = len(raw_text) if raw_text else 0
+                    
+                    logger.info(f"Retrieved content for document {doc_id}: content size={content_size}, raw_text size={raw_text_size}")
+                    
+                    # If we have raw_text but it's empty, log a warning
+                    if raw_text is not None and not raw_text:
+                        logger.warning(f"Empty raw_text for document {doc_id}")
+                    
+                    # If we don't have text but have binary content, try to extract it
+                    if not raw_text and content_data and isinstance(content_data, bytes):
+                        try:
+                            # Try to extract text directly from PDF
+                            import PyPDF2
+                            from io import BytesIO
+                            
+                            logger.info(f"Attempting direct text extraction from binary PDF for document {doc_id}")
+                            pdf_reader = PyPDF2.PdfReader(BytesIO(content_data))
+                            extracted_text = ""
+                            
+                            for page_num in range(len(pdf_reader.pages)):
+                                page = pdf_reader.pages[page_num]
+                                extracted_text += page.extract_text() + "\n\n"
+                            
+                            if extracted_text.strip():
+                                raw_text = extracted_text
+                                logger.info(f"Successfully extracted {len(raw_text)} chars of text directly from PDF")
+                        except Exception as e:
+                            logger.warning(f"Failed to extract text from PDF: {str(e)}")
+                else:
+                    logger.warning(f"Document content not found for {doc_id}")
+                
+                # Log available content types
+                available_content = []
+                if content_data: available_content.append("content")
+                if raw_text: available_content.append("raw_text")
+                if extracted_data: available_content.append("extracted_data")
+                logger.info(f"Document {doc_id} available content types: {', '.join(available_content)}")
+                
+                # Add document to the list with its content - both raw text and PDF bytes
+                doc_title = doc["filename"] if isinstance(doc, dict) else doc.filename
+                doc_type = doc.get("document_type", "unknown") if isinstance(doc, dict) else getattr(doc, "document_type", "unknown")
+                
+                formatted_doc = {
+                    "id": doc_id,
+                    "title": doc_title,
+                    "filename": doc_title,
+                    "document_type": doc_type,
+                    "mime_type": doc.get("mime_type", "application/pdf") if isinstance(doc, dict) else getattr(doc, "mime_type", "application/pdf"),
+                    "upload_timestamp": doc.get("upload_timestamp", "") if isinstance(doc, dict) else getattr(doc, "upload_timestamp", ""),
+                }
+                
+                # Add content data if available
+                if content_data is not None:
+                    formatted_doc["content"] = content_data
+                
+                # Add raw text if available
+                if raw_text:
+                    formatted_doc["raw_text"] = raw_text
+                    
+                # Add extracted data if available
+                if extracted_data:
+                    formatted_doc["extracted_data"] = extracted_data
+                
+                formatted_documents.append(formatted_doc)
+                logger.info(f"Added document {doc_id} to context for conversation {conversation_id}")
+            except Exception as e:
+                logger.error(f"Error processing document: {str(e)}")
+                logger.exception(e)
+                continue
         
         # Build the context
         context = {
@@ -320,36 +400,62 @@ class ConversationService:
             # Process each document
             for doc_info in context["documents"]:
                 try:
-                    # Get document content from repository
-                    document = await self.document_repository.get_document(doc_info["id"])
-                    if not document:
-                        logger.warning(f"Document {doc_info['id']} not found in repository")
-                        continue
-                    
                     # Get document content for citation processing
                     content_obj = await self.document_repository.get_document_content(doc_info["id"])
                     content_data = None
-                    if content_obj and hasattr(content_obj, "content"):
-                        content_data = content_obj.content
+                    raw_text = None
+                    extracted_data = None
                     
-                    # Add document to the list with its content
-                    document_texts.append({
-                        "id": doc_info["id"],
-                        "title": doc_info.get("filename", document.filename) if document else doc_info.get("filename", "Untitled"),
-                        "mime_type": doc_info.get("mime_type", document.mime_type) if document else doc_info.get("mime_type", "text/plain"),
-                        "content": content_data,
-                        "text": doc_info.get("text", ""),
-                        "summary": doc_info.get("summary", ""),
-                        "metadata": {
-                            "document_type": doc_info.get("document_type", "unknown"),
-                            "upload_date": doc_info.get("upload_date", ""),
-                            "page_count": doc_info.get("page_count", 0),
+                    # Extract content and raw text from the dictionary returned by repository
+                    if content_obj and isinstance(content_obj, dict):
+                        content_data = content_obj.get("content")
+                        raw_text = content_obj.get("raw_text")
+                        extracted_data = content_obj.get("extracted_data")
+                        
+                        # Create proper document dictionary instead of just raw text
+                        doc_dict = {
+                            "id": doc_info["id"],
+                            "title": doc_info.get("filename", "Document"),
+                            "type": "document"
                         }
-                    })
-                    
-                    logger.info(f"Added document {doc_info['id']} to context for conversation {conversation_id}")
+                        
+                        # Add the raw text if available
+                        if raw_text:
+                            doc_dict["raw_text"] = raw_text
+                            
+                            # Add document to list as properly structured dictionary
+                            document_texts.append(doc_dict)
+                            logger.info(f"Added document {doc_info['id']} dictionary to context (raw_text length: {len(raw_text)})")
+                        else:
+                            # Try to extract text from PDF if we have binary content
+                            if content_data and isinstance(content_data, bytes):
+                                try:
+                                    import PyPDF2
+                                    from io import BytesIO
+                                    logger.info(f"Trying to extract text directly from PDF for document {doc_info['id']}")
+                                    
+                                    pdf_reader = PyPDF2.PdfReader(BytesIO(content_data))
+                                    extracted_text = ""
+                                    
+                                    for page_num in range(len(pdf_reader.pages)):
+                                        page = pdf_reader.pages[page_num]
+                                        page_text = page.extract_text()
+                                        if page_text:
+                                            extracted_text += page_text + "\n\n"
+                                    
+                                    if extracted_text.strip():
+                                        doc_dict["raw_text"] = extracted_text
+                                        document_texts.append(doc_dict)
+                                        logger.info(f"Added document {doc_info['id']} with extracted text to context (length: {len(extracted_text)})")
+                                    else:
+                                        logger.warning(f"Could not extract text from PDF for document {doc_info['id']}")
+                                except Exception as pdf_error:
+                                    logger.warning(f"Error extracting text from PDF for document {doc_info['id']}: {str(pdf_error)}")
+                            else:
+                                logger.warning(f"No raw_text or PDF content available for document {doc_info['id']}")
                 except Exception as e:
-                    logger.error(f"Error processing document {doc_info['id']}: {str(e)}")
+                    logger.error(f"Error processing document content for LLM: {str(e)}")
+                    logger.exception(e)
                     continue
         
         # Get conversation messages
@@ -492,11 +598,33 @@ Here are some important guidelines:
         if document_texts and len(document_texts) > 0:
             prompt += "\nHere are the financial documents available for reference:\n\n"
             for i, doc in enumerate(document_texts):
-                doc_id = doc.get('id', f'doc_{i}')
-                doc_title = doc.get('title', 'Untitled Document')
-                doc_type = doc.get('content_type', 'unknown')
-                doc_text = doc.get('text', '')  # Include document text if available
+                # Handle string or dictionary format
+                if isinstance(doc, str):
+                    # If document_texts contains raw strings instead of dictionaries
+                    doc_id = f'doc_{i}'
+                    doc_title = f'Document {i+1}'
+                    doc_type = 'text/plain'
+                    doc_text = doc  # The string itself is the text
+                elif isinstance(doc, dict):
+                    # If document_texts contains dictionaries (preferred format)
+                    doc_id = doc.get('id', f'doc_{i}')
+                    doc_title = doc.get('title', doc.get('filename', 'Untitled Document'))
+                    doc_type = doc.get('content_type', doc.get('document_type', 'unknown'))
+                    
+                    # Get text from various possible fields
+                    doc_text = ""
+                    if 'raw_text' in doc:
+                        doc_text = doc['raw_text']
+                    elif 'text' in doc:
+                        doc_text = doc['text']
+                    elif 'content' in doc and isinstance(doc['content'], str):
+                        doc_text = doc['content']
+                else:
+                    # Skip invalid document formats
+                    logger.warning(f"Skipping invalid document format in system prompt: {type(doc)}")
+                    continue
                 
+                # Add document metadata
                 prompt += f"DOCUMENT {i+1} (ID: {doc_id}):\nTitle: {doc_title}\nType: {doc_type}\n"
                 
                 # Add a snippet of the document text if available
@@ -504,6 +632,8 @@ Here are some important guidelines:
                     # Limit to 1000 characters to avoid making the prompt too large
                     text_preview = doc_text[:1000] + "..." if len(doc_text) > 1000 else doc_text
                     prompt += f"\nContent preview:\n{text_preview}\n"
+                else:
+                    prompt += "\nNo text content available for this document.\n"
                 
                 prompt += "\n"
         
@@ -620,14 +750,24 @@ When analyzing financial documents, focus on:
         Returns:
             True if successful, False otherwise
         """
+        logger.info(f"Starting document addition process - conversation={conversation_id}, document={document_id}")
+        
         # Verify that the conversation and document exist
         conversation = await self.conversation_repository.get_conversation(conversation_id)
         if not conversation:
+            logger.error(f"Conversation {conversation_id} not found when adding document {document_id}")
             return False
         
         document = await self.document_repository.get_document(document_id)
         if not document:
+            logger.error(f"Document {document_id} not found when adding to conversation {conversation_id}")
             return False
+            
+        # Log document details for debugging
+        doc_status = getattr(document, "processing_status", "unknown")
+        doc_type = getattr(document, "document_type", "unknown")
+        doc_filename = getattr(document, "filename", "unknown")
+        logger.info(f"Document details: ID={document_id}, Filename={doc_filename}, Type={doc_type}, Status={doc_status}")
         
         # Add document to conversation
         success = await self.conversation_repository.add_document_to_conversation(
@@ -746,6 +886,60 @@ When analyzing financial documents, focus on:
             Dictionary with response details
         """
         try:
+            # Validate document_texts to ensure it's a list of dictionaries
+            if not isinstance(document_texts, list):
+                logger.warning(f"document_texts is not a list: {type(document_texts)}")
+                if isinstance(document_texts, str):
+                    logger.warning("Converting string document_text to a list with one document")
+                    # Convert to a proper document format
+                    document_texts = [{
+                        "id": "doc_1",
+                        "title": "Document",
+                        "raw_text": document_texts,
+                        "content_type": "text/plain"
+                    }]
+                elif isinstance(document_texts, dict):
+                    logger.warning("Converting dictionary document_text to a list with one document")
+                    document_texts = [document_texts]
+                else:
+                    logger.error(f"Invalid document_texts format: {type(document_texts)}")
+                    document_texts = []
+            
+            # Validate each document in the list
+            valid_documents = []
+            for i, doc in enumerate(document_texts):
+                if not isinstance(doc, dict):
+                    logger.warning(f"Document at index {i} is not a dictionary: {type(doc)}")
+                    if isinstance(doc, str):
+                        # Convert string to document dictionary
+                        valid_documents.append({
+                            "id": f"doc_{i+1}",
+                            "title": f"Document {i+1}",
+                            "raw_text": doc,
+                            "content_type": "text/plain"
+                        })
+                        logger.info(f"Converted string to document dictionary at index {i}")
+                    else:
+                        logger.warning(f"Skipping invalid document at index {i}")
+                        continue
+                else:
+                    valid_documents.append(doc)
+            
+            document_texts = valid_documents
+            
+            # Log document information before sending
+            logger.info(f"Processing {len(document_texts)} documents with LangGraph")
+            for i, doc in enumerate(document_texts):
+                doc_id = doc.get('id', f'doc_{i+1}')
+                has_content = 'raw_text' in doc and bool(doc.get('raw_text'))
+                content_length = len(doc.get('raw_text', '')) if has_content else 0
+                logger.info(f"Document {i+1}: ID={doc_id}, has_content={has_content}, length={content_length}")
+                
+                # Add a preview of content for debugging
+                if has_content and content_length > 0:
+                    content_preview = doc.get('raw_text', '')[:100] + "..." if content_length > 100 else doc.get('raw_text', '')
+                    logger.info(f"Document {i+1} content preview: {content_preview}")
+            
             # Generate response with LangGraph
             logger.info("Using LangGraph for basic response generation with documents")
             response_data = await self.claude_service.generate_response_with_langgraph(

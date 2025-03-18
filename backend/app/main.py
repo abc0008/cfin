@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi import HTTPException
 import logging
 import os
 import sys
@@ -8,6 +10,7 @@ from pathlib import Path
 
 from .routes import document, conversation, analysis
 from utils.init_db import init_db
+from utils.error_handling import http_exception_handler, validation_exception_handler
 
 # Load environment variables from .env file in the project root
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -54,6 +57,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register exception handlers for standardized error responses
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 # Include routers
 app.include_router(document.router)

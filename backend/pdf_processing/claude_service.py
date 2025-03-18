@@ -10,13 +10,34 @@ from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 import string
 from datetime import datetime
+import contextlib
 
-from models.document import ProcessedDocument, Citation as DocumentCitation, DocumentContentType
+from models.document import ProcessedDocument, Citation as DocumentCitation, DocumentContentType, DocumentMetadata, ProcessingStatus
 from models.citation import Citation, CitationType, CharLocationCitation, PageLocationCitation, ContentBlockLocationCitation
 from pdf_processing.langchain_service import LangChainService
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+@contextlib.asynccontextmanager
+async def get_anthropic_client():
+    """
+    Context manager to get an Anthropic client.
+    This function helps avoid circular imports between modules.
+    
+    Yields:
+        AsyncAnthropic: An Anthropic API client
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
+    
+    client = AsyncAnthropic(api_key=api_key)
+    try:
+        yield client
+    finally:
+        # No need to close the client explicitly as AsyncAnthropic handles this
+        pass
 
 # Conditionally import LangGraphService
 try:
@@ -59,13 +80,11 @@ class ClaudeService:
         logger.info(f"Initializing Claude API with key prefix: {masked_key}")
         
         # Using Claude 3.5 Sonnet for enhanced PDF support and citations
-        self.model = "claude-3-5-sonnet-latest"  # Use latest version for best citation support
+        self.model = "claude-3-5-sonnet-latest"  # Use the latest model version that supports citations
         try:
             self.client = AsyncAnthropic(
                 api_key=self.api_key,
-                default_headers={
-                    "anthropic-beta": "citations-2023-11-13,pdfs-2024-09-25"  # Enable both citations and PDF support beta
-                }
+                # No longer need to specify the PDF beta feature - it's built into the API now
             )
             logger.info(f"ClaudeService initialized with model: {self.model} and PDF support")
         except Exception as e:
@@ -159,12 +178,35 @@ class ClaudeService:
             # Encode PDF data as base64
             pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
             
-            # Step 1: Analyze document to determine type and periods
+            # Step 1: Extract raw text from PDF using PyPDF2
+            raw_text = ""
+            try:
+                import io
+                from PyPDF2 import PdfReader
+                
+                pdf_file = io.BytesIO(pdf_data)
+                pdf_reader = PdfReader(pdf_file)
+                
+                # Extract text from each page
+                page_texts = []
+                for page_num in range(len(pdf_reader.pages)):
+                    page = pdf_reader.pages[page_num]
+                    page_text = page.extract_text()
+                    if page_text:
+                        page_texts.append(f"--- Page {page_num+1} ---\n{page_text}")
+                
+                raw_text = "\n\n".join(page_texts)
+                logger.info(f"Successfully extracted {len(raw_text)} characters from PDF using PyPDF2")
+            except Exception as extract_error:
+                logger.warning(f"Failed to extract text from PDF using PyPDF2: {extract_error}")
+                logger.info("Will continue with alternative extraction methods")
+            
+            # Step 2: Analyze document to determine type and periods
             logger.info("Analyzing document type")
             document_type, periods = await self._analyze_document_type(pdf_base64, filename)
             logger.info(f"Document classified as: {document_type.value} with periods: {periods}")
             
-            # Step 2: Extract financial data with citations
+            # Step 3: Extract financial data with citations
             logger.info("Extracting financial data and citations")
             extracted_data, citations = await self._extract_financial_data_with_citations(
                 pdf_content=pdf_data, 
@@ -172,8 +214,46 @@ class ClaudeService:
                 document_type=document_type
             )
             logger.info(f"Extracted {len(citations)} citations")
+            
+            # Add or update raw_text in extracted_data if we have it
+            if raw_text and len(raw_text.strip()) > 0:
+                if not extracted_data:
+                    extracted_data = {}
+                extracted_data["raw_text"] = raw_text
+                logger.info(f"Added {len(raw_text)} characters of raw text to extracted_data")
+            
+            # If we weren't able to extract raw text with PyPDF2, try to get it from Claude's response
+            if not raw_text or len(raw_text.strip()) == 0:
+                # Try to extract raw text from Claude's response if available
+                if extracted_data.get("raw_text"):
+                    raw_text = extracted_data.get("raw_text")
+                    logger.info(f"Using raw text from Claude's response: {len(raw_text)} characters")
+                else:
+                    # If still no raw text, make one final attempt using OCR integration if available
+                    try:
+                        # Import OCR utility here to avoid circular imports
+                        from pdf_processing.ocr_utilities import extract_text_with_ocr
+                        
+                        ocr_text = await extract_text_with_ocr(pdf_data)
+                        if ocr_text and len(ocr_text.strip()) > 0:
+                            raw_text = ocr_text
+                            if not extracted_data:
+                                extracted_data = {}
+                            extracted_data["raw_text"] = raw_text
+                            logger.info(f"Added {len(raw_text)} characters of OCR-extracted text")
+                    except Exception as ocr_error:
+                        logger.warning(f"OCR text extraction failed: {ocr_error}")
+            
+            # Log and return a warning if we still couldn't extract any text
+            if not raw_text or len(raw_text.strip()) == 0:
+                logger.warning(f"Failed to extract any text from PDF {filename} using multiple methods")
+                # Create minimal raw text to avoid downstream issues
+                raw_text = f"Failed to extract text content from {filename}. This document may contain scanned images or be password-protected."
+                if not extracted_data:
+                    extracted_data = {}
+                extracted_data["raw_text"] = raw_text
+            
             logger.info(f"Extracted data keys: {list(extracted_data.keys())}")
-            logger.info(f"Financial data keys: {list(extracted_data.get('financial_data', {}).keys())}")
             
             # If we have financial data, update document type to FINANCIAL_REPORT if it wasn't already
             if extracted_data.get('financial_data') and extracted_data['financial_data']:
@@ -185,21 +265,54 @@ class ClaudeService:
             document_id = str(uuid.uuid4())
             confidence_score = 0.8  # Default confidence score
             
+            # Create document metadata
+            metadata = DocumentMetadata(
+                id=uuid.UUID(document_id),
+                filename=filename,
+                upload_timestamp=datetime.now(),
+                file_size=len(pdf_data),
+                mime_type="application/pdf",
+                user_id="system"  # Default user for API processing
+            )
+            
             # Create processed document
             processed_document = ProcessedDocument(
+                metadata=metadata,  # Include the required metadata
                 content_type=document_type,
-                extraction_timestamp=datetime.now().isoformat(),
+                extraction_timestamp=datetime.now(),
                 periods=periods,
                 extracted_data=extracted_data,
                 confidence_score=confidence_score,
-                processing_status="completed"
+                processing_status=ProcessingStatus.COMPLETED
             )
             
             return processed_document, citations
             
         except Exception as e:
             logger.exception(f"Error processing PDF: {e}")
-            raise
+            
+            # Create minimal document with error information
+            document_id = str(uuid.uuid4())
+            metadata = DocumentMetadata(
+                id=uuid.UUID(document_id),
+                filename=filename,
+                upload_timestamp=datetime.now(),
+                file_size=len(pdf_data) if pdf_data else 0,
+                mime_type="application/pdf",
+                user_id="system"
+            )
+            
+            error_message = f"Error processing PDF: {str(e)}"
+            processed_document = ProcessedDocument(
+                metadata=metadata,
+                content_type=DocumentContentType.OTHER,
+                extraction_timestamp=datetime.now(),
+                extracted_data={"error": error_message, "raw_text": f"Failed to process document due to error: {str(e)}"},
+                confidence_score=0.0,
+                processing_status=ProcessingStatus.FAILED
+            )
+            
+            return processed_document, []
 
     async def _analyze_document_type(self, pdf_base64: str, filename: str) -> Tuple[DocumentContentType, List[str]]:
         """
@@ -213,10 +326,14 @@ class ClaudeService:
         Returns:
             Tuple of document type and list of time periods
         """
+        if not self.client:
+            logger.error("Cannot analyze document type because Claude API client is not available")
+            raise ValueError("Claude API client is not available. Check your API key.")
+        
         try:
-            logger.info("Analyzing document type with Claude API")
+            logger.info(f"Analyzing document type for: {filename}")
             
-            # Create message using document content type
+            # Create messages using the new document format
             messages = [
                 {
                     "role": "user",
@@ -227,9 +344,7 @@ class ClaudeService:
                                 "type": "base64",
                                 "media_type": "application/pdf",
                                 "data": pdf_base64
-                            },
-                            "title": filename,
-                            "citations": {"enabled": False}  # No need for citations in document type analysis
+                            }
                         },
                         {
                             "type": "text",
@@ -256,7 +371,35 @@ class ClaudeService:
             # Parse the JSON response
             try:
                 result = json.loads(json_match.group(0))
-                document_type = DocumentContentType(result.get("document_type", "other"))
+                
+                # Handle pipe-separated document types (e.g., "balance_sheet|income_statement")
+                doc_type_str = result.get("document_type", "other")
+                logger.info(f"Raw document_type from Claude: {doc_type_str}")
+                
+                # Split by pipe if present and try each type
+                if "|" in doc_type_str:
+                    doc_types = doc_type_str.split("|")
+                    # Try each type in order
+                    for dt in doc_types:
+                        dt = dt.strip()
+                        try:
+                            document_type = DocumentContentType(dt)
+                            logger.info(f"Selected document type '{dt}' from combined types: {doc_type_str}")
+                            break
+                        except ValueError:
+                            pass
+                    else:
+                        # If no valid type found, use OTHER
+                        logger.warning(f"No valid document type found in '{doc_type_str}', using OTHER")
+                        document_type = DocumentContentType.OTHER
+                else:
+                    # Single document type
+                    try:
+                        document_type = DocumentContentType(doc_type_str)
+                    except ValueError:
+                        logger.warning(f"Invalid document type '{doc_type_str}', using OTHER")
+                        document_type = DocumentContentType.OTHER
+                
                 periods = result.get("periods", [])
                 
                 logger.info(f"Document classified as {document_type.value} with periods: {periods}")
@@ -281,26 +424,31 @@ class ClaudeService:
         Returns:
             Tuple of extracted data dictionary and list of citations
         """
+        if not self.client:
+            logger.error("Cannot extract financial data because Claude API client is not available")
+            raise ValueError("Claude API client is not available. Check your API key.")
+        
         try:
-            logger.info(f"Extracting financial data from PDF: {filename}")
+            logger.info(f"Extracting financial data with citations from: {filename}")
             
-            # Handle both bytes and base64 string input
+            # Convert to base64 if needed
             if isinstance(pdf_content, bytes):
-                # Convert PDF to base64
                 pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
             else:
-                # Already base64
                 pdf_base64 = pdf_content
             
-            # Create a prompt to extract financial data
-            prompt = """Please analyze this financial document and extract key financial information.
-                     Identify important metrics like revenue, profit, EPS, and any significant financial events.
-                     Be specific with numbers and cite the pages where you found the information."""
+            # Prepare document type for the prompt
+            doc_type_str = document_type.value if document_type else "financial document"
             
-            # Set system prompt
-            system_prompt = "You are a financial analyst assistant. Extract relevant financial metrics and data from documents with accurate citations."
+            # Financial analysis prompt with structured data extraction
+            system_prompt = """You are a highly specialized financial document analysis assistant. Extract structured financial data from the document accurately.
+Follow these guidelines:
+1. Identify all financial tables and metrics
+2. Extract values with their correct time periods, labels, and units
+3. Present the data in a structured JSON format
+4. Provide citations for all extracted data"""
             
-            # Setup messages for Claude
+            # Create messages with the PDF document
             messages = [
                 {
                     "role": "user",
@@ -311,141 +459,52 @@ class ClaudeService:
                                 "type": "base64",
                                 "media_type": "application/pdf",
                                 "data": pdf_base64
-                            },
-                            "title": filename,
-                            "citations": {"enabled": True}
+                            }
                         },
                         {
                             "type": "text",
-                            "text": prompt
+                            "text": f"Analyze this {doc_type_str} and extract all financial data in a structured format. Include key metrics, time periods, and values. Return a comprehensive JSON with all the financial information."
                         }
                     ]
                 }
             ]
             
-            # Call Claude API with separate system prompt
+            # Call Claude API with citations enabled
             response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=4000,
-                messages=messages,
-                system=system_prompt
+                system=system_prompt,
+                messages=messages
             )
             
-            # Process the response with citation blocks
-            extracted_data = {"raw_text": "", "financial_data": {}}
-            citations = []
+            # Extract text content and citations
+            content = self._process_claude_response(response)
+            text = content.get("text", "")
+            citations = content.get("citations", [])
             
-            # Extract raw text and citations from the response
-            raw_text_parts = []
-            financial_insights = {}
-            
-            # Track the financial metrics we've found
-            metrics_count = 0
-            
-            # Process each content block in the response
-            for content_block in response.content:
-                if content_block.type == "text":
-                    raw_text_parts.append(content_block.text)
-                    
-                    # If the block has citations, process them
-                    if hasattr(content_block, "citations") and content_block.citations:
-                        # This block contains useful financial insights with citations
-                        block_text = content_block.text
-                        
-                        # Add an entry in financial_insights
-                        insight_id = f"insight_{metrics_count}"
-                        
-                        # Actually store the insight in the financial_insights dictionary
-                        financial_insights[insight_id] = {
-                            "text": block_text,
-                            "citations": [],
-                            "page_references": []
-                        }
-                        
-                        # Process each citation
-                        for citation in content_block.citations:
-                            citation_obj = self._convert_claude_citation(citation)
-                            if citation_obj:
-                                # Handle both dictionary and object formats
-                                if isinstance(citation_obj, dict):
-                                    citation_type = citation_obj.get("type", "unknown")
-                                    
-                                    # Extract page number based on citation type
-                                    if citation_type == "page_location":
-                                        page_num = citation_obj.get("start_page_number", 1)
-                                    elif citation_type == "char_location":
-                                        page_num = 1  # Default for char citations
-                                    else:
-                                        page_num = 1  # Default fallback
-                                    
-                                    doc_citation = DocumentCitation(
-                                        id=str(uuid.uuid4()),
-                                        page=page_num,
-                                        text=citation_obj.get("cited_text", ""),
-                                        section=f"Page {page_num}"
-                                    )
-                                else:
-                                    # Handle object attributes with fallbacks
-                                    if hasattr(citation_obj, "type"):
-                                        citation_type = citation_obj.type
-                                    else:
-                                        citation_type = "unknown"
-                                    
-                                    # Extract page number based on citation type
-                                    if hasattr(citation_obj, "start_page_number"):
-                                        page_num = citation_obj.start_page_number
-                                    else:
-                                        page_num = 1  # Default fallback
-                                    
-                                    doc_citation = DocumentCitation(
-                                        id=str(uuid.uuid4()),
-                                        page=page_num,
-                                        text=getattr(citation_obj, "cited_text", ""),
-                                        section=f"Page {page_num}"
-                                    )
-                                # Add the page reference to the current insight
-                                financial_insights[insight_id]["citations"].append(doc_citation.id)
-                                financial_insights[insight_id]["page_references"].append(page_num)
-                                
-                                citations.append(doc_citation)
-                        
-                        metrics_count += 1
-            
-            # Combine all raw text parts
-            extracted_data["raw_text"] = "\n".join(raw_text_parts)
-            extracted_data["financial_data"] = financial_insights
-            
-            # If no financial insights were found, try structured extraction as a fallback
-            if not financial_insights and extracted_data["raw_text"]:
-                logger.info("No financial insights found with citations. Trying structured extraction fallback.")
-                try:
-                    structured_data = await self.extract_structured_financial_data(extracted_data["raw_text"])
-                    
-                    # If structured data was successfully extracted, use it
-                    if structured_data and not structured_data.get("error"):
-                        logger.info("Successfully extracted structured financial data as fallback")
-                        
-                        # Create financial insights from structured data
-                        if "metrics" in structured_data and structured_data["metrics"]:
-                            extracted_data["financial_data"]["metrics"] = structured_data["metrics"]
-                            
-                        if "ratios" in structured_data and structured_data["ratios"]:
-                            extracted_data["financial_data"]["ratios"] = structured_data["ratios"]
-                            
-                        if "key_insights" in structured_data and structured_data["key_insights"]:
-                            extracted_data["financial_data"]["insights"] = structured_data["key_insights"]
-                            
-                        if "periods" in structured_data and structured_data["periods"]:
-                            extracted_data["periods"] = structured_data["periods"]
-                            
-                except Exception as fallback_error:
-                    logger.error(f"Error in structured extraction fallback: {fallback_error}")
+            # Parse the extracted data from the response text
+            extracted_data = {}
+            try:
+                # Check for JSON format in the response
+                json_match = re.search(r'```json\s*([\s\S]*?)\s*```|{[\s\S]*}', text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1) if json_match.group(1) else json_match.group(0)
+                    # Clean up the JSON string if needed
+                    json_str = re.sub(r'^```json\s*|\s*```$', '', json_str)
+                    json_data = json.loads(json_str)
+                    extracted_data = json_data
+                else:
+                    logger.warning("Could not find JSON data in Claude's response")
+                    extracted_data = {"raw_text": text}
+            except Exception as e:
+                logger.error(f"Error parsing extracted data JSON: {str(e)}")
+                extracted_data = {"raw_text": text, "error": str(e)}
             
             return extracted_data, citations
             
         except Exception as e:
-            logger.exception(f"Error extracting financial data: {e}")
-            raise
+            logger.error(f"Error extracting financial data: {str(e)}")
+            return {"error": str(e)}, []
 
     async def generate_response_with_citations(self, messages: List[Dict[str, Any]], documents: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -640,93 +699,23 @@ class ClaudeService:
                     print("DEBUG: WARNING - No citations found in the Claude API response")
                     logger.warning("No citations found in the Claude API response")
                 
-                # Debug dump of raw citations extraction before processing
-                citation_count = 0
-                for block in response.content:
-                    if hasattr(block, 'citations') and block.citations:
-                        citation_count += len(block.citations)
-                
-                print(f"DEBUG: Found total of {citation_count} raw citations in Claude API response")
-                
-                # If no citations found, print a special warning
-                if citation_count == 0:
-                    print("DEBUG: WARNING - Claude API NOT returning structured citations!")
-                    print("DEBUG: This indicates a potential issue with the API or model configuration.")
-                    print("DEBUG: Forcing page-based manual citation extraction as fallback")
-                    
-                    # Create manual citations based on bracketed text in response
-                    manual_citations = []
-                    # Match patterns like [Page X], [page X], or just [X] where X is a number
-                    page_citation_patterns = [
-                        r'\[Page (\d+)\]',
-                        r'\[page (\d+)\]', 
-                        r'\[p\.? (\d+)\]',
-                        r'\[(\d+)\]'
-                    ]
-                    
-                    for i, block in enumerate(response.content):
-                        if block.type == "text" and hasattr(block, 'text'):
-                            text = block.text
-                            all_matches = []
-                            
-                            # Try all citation patterns
-                            for pattern in page_citation_patterns:
-                                page_matches = re.findall(pattern, text)
-                                if page_matches:
-                                    all_matches.extend(page_matches)
-                            
-                            if all_matches:
-                                print(f"DEBUG: Found {len(all_matches)} manual page citations in text: {all_matches}")
-                                
-                                # Try to extract context around the citation
-                                # Find sentences containing citations
-                                sentences = re.split(r'(?<=[.!?])\s+', text)
-                                for sentence in sentences:
-                                    for pattern in page_citation_patterns:
-                                        page_refs = re.findall(pattern, sentence)
-                                        if page_refs:
-                                            for page_num in page_refs:
-                                                # Get the sentence text without the citation pattern
-                                                clean_sentence = re.sub(r'\[[^\]]*\]', '', sentence).strip()
-                                                
-                                                manual_citation = {
-                                                    "type": "page_location",
-                                                    "document_index": 0,  # First document
-                                                    "document_title": "Financial Report",  # Generic title
-                                                    "start_page_number": int(page_num),
-                                                    "end_page_number": int(page_num) + 1,
-                                                    "cited_text": clean_sentence[:200],  # Limit text length
-                                                }
-                                                manual_citations.append(manual_citation)
-                            
-                            # If no sentence-based citations were found, fallback to simple page numbers
-                            if not manual_citations:
-                                for pattern in page_citation_patterns:
-                                    page_matches = re.findall(pattern, text)
-                                    if page_matches:
-                                        for page_num in page_matches:
-                                            manual_citation = {
-                                                "type": "page_location",
-                                                "document_index": 0,  # First document
-                                                "document_title": "Financial Report",  # Generic title
-                                                "start_page_number": int(page_num),
-                                                "end_page_number": int(page_num) + 1,
-                                                "cited_text": f"Financial data from page {page_num}",
-                                            }
-                                            manual_citations.append(manual_citation)
-                    
-                    if manual_citations:
-                        print(f"DEBUG: Created {len(manual_citations)} manual fallback citations")
-                
                 # Process the response
                 processed_response = self._process_claude_response(response)
                 
-                # If we created manual citations, add them to the processed response
-                if citation_count == 0 and 'manual_citations' in locals() and manual_citations:
-                    processed_response["citations"] = manual_citations
-                    print(f"DEBUG: Added {len(manual_citations)} manual citations to response")
-                    # Make sure manual citations are easy to identify for debugging
-                    print(f"DEBUG: Manual citation example: {manual_citations[0] if manual_citations else 'None'}")
+                # Check if citations are available in the response
+                citations = []
+                if hasattr(response, 'content'):
+                    for block in response.content:
+                        if hasattr(block, 'citations') and block.citations:
+                            for citation in block.citations:
+                                citations.append(citation)
+                
+                logger.info(f"Extracted {len(citations)} citations from response")
+                
+                # Add citations to the processed response if available
+                if citations:
+                    processed_response["citations"] = citations
+                    logger.info(f"Added {len(citations)} citations to response")
                 
                 return processed_response
                 
@@ -770,18 +759,72 @@ class ClaudeService:
         try:
             # Extract document information
             doc_type = document.get("mime_type", "").lower()
-            doc_content = document.get("content", "")
             doc_id = document.get("id", "")
-            doc_title = document.get("title", f"Document {doc_id}")
+            doc_title = document.get("title", document.get("filename", f"Document {doc_id}"))
             
+            # Try multiple sources for document content
+            doc_content = None
+            content_source = None
+            
+            # Log all available fields for debugging
+            logger.info(f"Document fields: {list(document.keys())}")
+            
+            # First priority: "content" field
+            if document.get("content"):
+                doc_content = document.get("content")
+                content_source = "content field"
+            
+            # Second priority: "raw_text" field
+            elif document.get("raw_text"):
+                doc_content = document.get("raw_text")
+                content_source = "raw_text field"
+                # For raw_text content, use text document type
+                doc_type = "text/plain"
+            
+            # Third priority: "extracted_data.raw_text" field
+            elif document.get("extracted_data") and isinstance(document.get("extracted_data"), dict) and document.get("extracted_data").get("raw_text"):
+                doc_content = document.get("extracted_data").get("raw_text")
+                content_source = "extracted_data.raw_text field"
+                # For extracted text, use text document type
+                doc_type = "text/plain"
+            
+            # Fourth priority: "text" field
+            elif document.get("text"):
+                doc_content = document.get("text")
+                content_source = "text field"
+                # For text content, use text document type
+                doc_type = "text/plain"
+                
+            # Fifth priority: Try to get the raw PDF content from storage
+            elif document.get("id"):
+                try:
+                    # Attempt to get the PDF data directly - this is a fallback mechanism
+                    from repositories.document_repository import DocumentRepository
+                    from repositories.database import get_database_session
+                    
+                    # Get session and repository
+                    db_session = get_database_session()
+                    document_repository = DocumentRepository(db_session)
+                    
+                    # Get document content directly
+                    doc_content = asyncio.run(document_repository.get_document_file_content(document.get('id')))
+                    
+                    if doc_content and len(doc_content) > 0:
+                        content_source = "direct PDF from storage"
+                        doc_type = "application/pdf"
+                        logger.info(f"Retrieved PDF content directly from storage for document {doc_id}")
+                except Exception as storage_e:
+                    logger.warning(f"Failed to get PDF directly from storage for document {doc_id}: {storage_e}")
+                    
+            # If all attempts to get content failed, create a minimal document with placeholder text
             if not doc_content:
-                logger.warning(f"Empty document content for {doc_id}")
-                return None
+                logger.warning(f"No document content found for {doc_id} - using fallback placeholder")
+                doc_content = f"Document content unavailable for {doc_title}. Please try re-uploading the document."
+                content_source = "fallback placeholder"
+                doc_type = "text/plain"
             
-            # Default to PDF type if not specified but content is bytes
-            if not doc_type and isinstance(doc_content, bytes):
-                doc_type = "application/pdf"
-                logger.info(f"Assuming PDF type for document {doc_id} based on bytes content")
+            if content_source:
+                logger.info(f"Using {content_source} for document {doc_id}")
             
             # Handle PDF documents
             if "pdf" in doc_type or doc_type == "application/pdf":
@@ -792,7 +835,6 @@ class ClaudeService:
                         base64_content = doc_content.split('base64,')[1]
                         doc_content = base64.b64decode(base64_content)
                     elif isinstance(doc_content, str) and len(doc_content) > 0:
-                        # Try to convert string to bytes if it's not empty
                         try:
                             # Check if it might be base64 encoded
                             if all(c in string.ascii_letters + string.digits + '+/=' for c in doc_content):
@@ -843,26 +885,54 @@ class ClaudeService:
                     logger.exception(f"Error encoding PDF content for {doc_id}: {e}")
                     return None
             
-            # Handle text documents
-            elif doc_type == "text/plain" or isinstance(doc_content, str):
-                text_content = doc_content if isinstance(doc_content, str) else doc_content.decode('utf-8')
-                return {
-                    "type": "document",
-                    "source": {
-                        "type": "text",
-                        "text": text_content
-                    },
-                    "title": doc_title,
-                    "citations": {"enabled": True}
-                }
-            
+            # At this point, treat as text document (either originally or after conversion)
+            # Ensure we have valid string content
+            text_content = ""
+            if isinstance(doc_content, str):
+                text_content = doc_content
+            elif isinstance(doc_content, bytes):
+                try:
+                    text_content = doc_content.decode('utf-8', errors='replace')
+                except UnicodeDecodeError:
+                    text_content = f"Binary content for {doc_title} (could not convert to text)"
             else:
-                logger.warning(f"Unsupported document type: {doc_type}")
-                return None
+                text_content = f"Content for {doc_title} in unsupported format: {type(doc_content)}"
+            
+            # Ensure we have some minimal content
+            if not text_content.strip():
+                text_content = f"Empty document content for {doc_title}"
+            
+            # Truncate very long text to avoid token limits (30,000 chars ~ 7,500 tokens)
+            if len(text_content) > 30000:
+                text_content = text_content[:30000] + f"\n\n[Document truncated due to length. Original size: {len(text_content)} characters]"
+            
+            logger.info(f"Prepared text document for Claude API: {doc_id}, length: {len(text_content)} chars")
+            
+            # Create proper text document format for Claude API
+            return {
+                "type": "document",
+                "source": {
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": text_content
+                },
+                "title": doc_title,
+                "citations": {"enabled": True}
+            }
                 
         except Exception as e:
             logger.exception(f"Error preparing document for citation: {e}")
-            return None
+            # Return a minimal valid document to prevent API errors
+            return {
+                "type": "document",
+                "source": {
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": f"Error preparing document {document.get('id', 'unknown')} for citation: {str(e)}"
+                },
+                "title": document.get("title", document.get("filename", "Document")),
+                "citations": {"enabled": True}
+            }
 
     def _process_claude_response(self, response: AnthropicMessage) -> Dict[str, Any]:
         """
@@ -874,123 +944,32 @@ class ClaudeService:
         Returns:
             Processed response with text content and structured citations
         """
-        try:
-            processed_response = {
-                "content": "",
-                "content_blocks": [],
-                "citations": []
-            }
+        result = {
+            "text": "",
+            "citations": []
+        }
+        
+        # Extract text content
+        if hasattr(response, "content") and response.content:
+            # Combine all text content
+            text_parts = []
+            citations = []
             
-            # Check if response contains content
-            if not response.content or len(response.content) == 0:
-                logger.warning("Claude returned empty response content")
-                return processed_response
-            
-            # Log response structure for debugging
-            logger.info(f"Processing Claude response with {len(response.content)} content blocks")
-            for i, block in enumerate(response.content):
-                logger.info(f"Content block {i}: type={block.type}")
-                if hasattr(block, 'citations') and block.citations:
-                    logger.info(f"  - Contains {len(block.citations)} citations")
-                    # Log citation details
-                    for j, citation in enumerate(block.citations):
-                        if hasattr(citation, 'type'):
-                            logger.info(f"    - Citation {j}: type={citation.type}")
-                        elif isinstance(citation, dict):
-                            logger.info(f"    - Citation {j}: type={citation.get('type', 'unknown')}")
-                        else:
-                            logger.info(f"    - Citation {j}: unknown format {type(citation)}")
-                
-            # Process each content block
-            full_text = []
-            citation_count = 0
-            
-            for content_block in response.content:
-                # Handle text blocks
-                if content_block.type == "text":
-                    # Add text to full response text
-                    full_text.append(content_block.text)
+            for block in response.content:
+                if block.type == "text":
+                    text_parts.append(block.text)
                     
-                    # Create content block
-                    block = {
-                        "type": "text",
-                        "text": content_block.text
-                    }
-                    
-                    # Process citations if present
-                    if hasattr(content_block, 'citations') and content_block.citations:
-                        block_citations = []
-                        
-                        # Convert each citation to our model
-                        for citation in content_block.citations:
+                    # Process citations if available
+                    if hasattr(block, "citations") and block.citations:
+                        for citation in block.citations:
                             citation_obj = self._convert_claude_citation(citation)
                             if citation_obj:
-                                # Add a unique ID to the citation
-                                citation_count += 1
-                                citation_id = f"citation_{citation_count}"
-                                
-                                # Update the citation object with the ID
-                                if isinstance(citation_obj, dict):
-                                    citation_obj["id"] = citation_id
-                                else:
-                                    citation_obj.id = citation_id
-                                
-                                block_citations.append(citation_obj)
-                                
-                                # Add to the global citations list
-                                processed_response["citations"].append(citation_obj)
-                        
-                        # Add citations to the block
-                        if block_citations:
-                            block["citations"] = block_citations
-                    
-                    processed_response["content_blocks"].append(block)
-                
-                # Handle other content types if needed
-                else:
-                    logger.warning(f"Unhandled content block type: {content_block.type}")
+                                citations.append(citation_obj)
             
-            # Combine text into one response
-            processed_response["content"] = "\n".join(full_text)
-            
-            # Log citation count
-            if processed_response["citations"]:
-                logger.info(f"Processed {len(processed_response['citations'])} citations from Claude response")
-                # Log some details about the first few citations
-                for i, citation in enumerate(processed_response["citations"][:3]):
-                    if isinstance(citation, dict):
-                        logger.info(f"Citation {i}: type={citation.get('type', 'unknown')}, text={citation.get('cited_text', '')[:50]}...")
-                    else:
-                        logger.info(f"Citation {i}: type={getattr(citation, 'type', 'unknown')}, text={getattr(citation, 'cited_text', '')[:50]}...")
-            else:
-                logger.warning("No citations found in Claude response")
-            
-            return processed_response
-            
-        except Exception as e:
-            logger.exception(f"Error processing Claude response: {e}")
-            # Return basic response without citations
-            try:
-                # Try to extract basic text content
-                content = ""
-                if response.content and len(response.content) > 0:
-                    for block in response.content:
-                        if hasattr(block, "text"):
-                            content += block.text + "\n"
-                
-                return {
-                    "content": content.strip(),
-                    "content_blocks": [],
-                    "citations": []
-                }
-            except Exception as nested_error:
-                logger.exception(f"Error extracting basic content from response: {nested_error}")
-                # Fallback for any other errors
-                return {
-                    "content": "Error processing response",
-                    "content_blocks": [],
-                    "citations": []
-                }
+            result["text"] = "\n".join(text_parts)
+            result["citations"] = citations
+        
+        return result
 
     def _convert_claude_citation(self, citation: Any) -> Optional[Union[Dict[str, Any], Citation]]:
         """
@@ -1130,6 +1109,45 @@ class ClaudeService:
         Returns:
             Dictionary containing the response text and any extracted citations
         """
+        # Critical logging for document processing diagnosis
+        logger.info(f"===== Claude API document processing request =====")
+        logger.info(f"Question: {question[:100]}" + ("..." if len(question) > 100 else ""))
+        logger.info(f"Number of documents: {len(document_texts)}")
+        logger.info(f"History length: {len(conversation_history) if conversation_history else 0}")
+        
+        # Log document IDs for tracing
+        doc_ids = [doc.get('id', 'unknown') for doc in document_texts]
+        logger.info(f"Document IDs in request: {doc_ids}")
+        
+        # Check document content existence 
+        for i, doc in enumerate(document_texts):
+            doc_id = doc.get('id', f'doc_{i}')
+            has_content = False
+            
+            # Check various possible content fields
+            if 'raw_text' in doc and doc['raw_text']:
+                has_content = True
+                logger.info(f"Document {doc_id} has raw_text content: {len(doc['raw_text'])} chars")
+            elif 'content' in doc and isinstance(doc['content'], str) and doc['content']:
+                has_content = True
+                logger.info(f"Document {doc_id} has string content: {len(doc['content'])} chars")
+            elif 'text' in doc and doc['text']:
+                has_content = True
+                logger.info(f"Document {doc_id} has text content: {len(doc['text'])} chars")
+            elif 'extracted_data' in doc and doc['extracted_data']:
+                extracted_type = type(doc['extracted_data']).__name__
+                logger.info(f"Document {doc_id} has extracted_data of type: {extracted_type}")
+                
+                if isinstance(doc['extracted_data'], dict) and 'raw_text' in doc['extracted_data']:
+                    has_content = True
+                    logger.info(f"Document {doc_id} has extracted_data.raw_text: {len(doc['extracted_data']['raw_text'])} chars")
+            
+            if not has_content:
+                logger.warning(f"⚠️ Document {doc_id} has no usable text content! This may cause visibility issues.")
+                logger.warning(f"Available keys: {list(doc.keys())}")
+        
+        logger.info(f"===== End Claude API document request information =====")
+        
         if not LANGGRAPH_AVAILABLE or not self.langgraph_service:
             logger.warning("LangGraph service is not available, falling back to LangChain")
             # Fall back to LangChain if LangGraph is not available
@@ -1210,13 +1228,15 @@ class ClaudeService:
                 "citations": []
             }
 
-    async def extract_structured_financial_data(self, text: str) -> Dict[str, Any]:
+    async def extract_structured_financial_data(self, text: str, pdf_data: bytes = None, filename: str = None) -> Dict[str, Any]:
         """
         Extract structured financial data from raw text using Claude.
         This is a fallback method when standard extraction fails to find financial tables.
         
         Args:
             text: Raw text from a document
+            pdf_data: Optional raw bytes of the PDF file for improved extraction with native PDF support
+            filename: Optional filename of the PDF
             
         Returns:
             Dictionary of structured financial data
@@ -1256,21 +1276,58 @@ class ClaudeService:
             Always output valid JSON. If specific financial metrics are not available, include empty arrays in those categories.
             Be precise with numbers and dates. Recognize financial statements and extract metrics, ratios, and insights."""
             
+            # Prepare messages
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": extraction_prompt
+                        }
+                    ]
+                }
+            ]
+            
+            # If we have PDF data, use it with the document content type for better extraction
+            if pdf_data:
+                logger.info(f"Using native PDF document support for financial data extraction")
+                
+                # Prepare the document for citation using our enhanced method
+                document = {
+                    "id": "financial_document",
+                    "title": filename if filename else "Financial Document",
+                    "content": pdf_data,
+                    "mime_type": "application/pdf"
+                }
+                
+                prepared_document = self._prepare_document_for_citation(document)
+                if not prepared_document:
+                    logger.warning("Failed to prepare document for financial data extraction, falling back to text")
+                else:
+                    # Add the prepared document as content in the user message
+                    messages.append({
+                        "role": "user",
+                        "content": [prepared_document]
+                    })
+            else:
+                # Fall back to using just the text content
+                logger.info("Using text-only mode for financial data extraction")
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text[:15000]  # Limit text length
+                        }
+                    ]
+                })
+            
             # Call Claude API
             response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=2000,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"{extraction_prompt}\n\n{text[:15000]}"  # Limit text length
-                            }
-                        ]
-                    }
-                ],
+                messages=messages,
                 system=system_prompt,
                 temperature=0.0  # Use low temperature for factual extraction
             )

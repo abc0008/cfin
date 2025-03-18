@@ -33,7 +33,7 @@ Create a `.env` file in the backend directory with the following variables:
 ```
 # API Keys
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
-CLAUDE_MODEL=claude-3-sonnet-20240229
+CLAUDE_MODEL=claude-3-sonnet-latest
 
 # Database Configuration
 DATABASE_URL=sqlite:///./fdas.db  # For development; use PostgreSQL in production

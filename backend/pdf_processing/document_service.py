@@ -88,9 +88,41 @@ class DocumentService:
                 logger.info(f"Successfully processed document {document_id} with Claude service")
                 logger.info(f"Extracted {len(citations)} citations from document")
             except Exception as e:
-                logger.error(f"Error using Claude service: {str(e)}")
+                logger.error(f"Error using Claude service: {str(e)}", exc_info=True)
                 
-                # In case of failure, store error and fail gracefully
+                # Attempt to extract raw text even if Claude processing fails
+                raw_text = ""
+                try:
+                    import io
+                    from PyPDF2 import PdfReader
+                    
+                    pdf_file = io.BytesIO(pdf_data)
+                    pdf_reader = PdfReader(pdf_file)
+                    
+                    # Extract text from each page
+                    page_texts = []
+                    for page_num in range(len(pdf_reader.pages)):
+                        page = pdf_reader.pages[page_num]
+                        page_text = page.extract_text()
+                        if page_text:
+                            page_texts.append(f"--- Page {page_num+1} ---\n{page_text}")
+                    
+                    raw_text = "\n\n".join(page_texts)
+                    logger.info(f"Extracted {len(raw_text)} characters of raw text as fallback for document {document_id}")
+                    
+                    # Store the extracted text in database even if processing failed
+                    await self.document_repository.update_document_content(
+                        document_id=document_id,
+                        document_type=DocumentType.OTHER,
+                        extracted_data={"raw_text": raw_text},
+                        raw_text=raw_text,
+                        confidence_score=0.0
+                    )
+                    
+                except Exception as extract_error:
+                    logger.error(f"Failed to extract fallback text: {extract_error}", exc_info=True)
+                
+                # Update status to failed with error message
                 await self.document_repository.update_document_status(
                     document_id=document_id,
                     status=ProcessingStatusEnum.FAILED,
@@ -105,6 +137,38 @@ class DocumentService:
             raw_text = ""
             if processed_document.extracted_data and "raw_text" in processed_document.extracted_data:
                 raw_text = processed_document.extracted_data["raw_text"]
+                logger.info(f"Found {len(raw_text)} characters of raw text in processed document")
+                logger.info(f"Sample text: {raw_text[:200]}...")
+            
+            # Ensure we have some raw text
+            if not raw_text or len(raw_text.strip()) == 0:
+                logger.warning(f"No raw text found in processed document for {document_id} - attempting extraction")
+                try:
+                    import io
+                    from PyPDF2 import PdfReader
+                    
+                    pdf_file = io.BytesIO(pdf_data)
+                    pdf_reader = PdfReader(pdf_file)
+                    
+                    # Extract text from each page
+                    page_texts = []
+                    for page_num in range(len(pdf_reader.pages)):
+                        page = pdf_reader.pages[page_num]
+                        page_text = page.extract_text()
+                        if page_text:
+                            page_texts.append(f"--- Page {page_num+1} ---\n{page_text}")
+                    
+                    raw_text = "\n\n".join(page_texts)
+                    logger.info(f"Successfully extracted {len(raw_text)} characters as fallback raw text")
+                    
+                    # Update the extracted data with the raw text
+                    if not processed_document.extracted_data:
+                        processed_document.extracted_data = {}
+                    processed_document.extracted_data["raw_text"] = raw_text
+                    
+                except Exception as extract_error:
+                    logger.error(f"Failed to extract fallback text: {extract_error}", exc_info=True)
+                    raw_text = f"Failed to extract text content from {filename}. PDF may contain images or be protected."
             
             # Update document with extracted content
             logger.info(f"Updating document {document_id} content in database")
@@ -116,6 +180,9 @@ class DocumentService:
                 raw_text=raw_text,
                 confidence_score=processed_document.confidence_score
             )
+            
+            # Log document processing details for debugging
+            logger.info(f"Document {document_id} processed. Status: COMPLETED, Has raw_text: {bool(raw_text)}, Raw text length: {len(raw_text)}, Extracted data keys: {list(processed_document.extracted_data.keys()) if processed_document.extracted_data else 'None'}")
             
             # Add citations to the database
             added_citations = []
@@ -181,21 +248,46 @@ class DocumentService:
     
     async def get_document_financial_data(self, document_id: str) -> Dict[str, Any]:
         """
-        Get structured financial data extracted from a document.
+        Get content from a document that can be used for financial analysis.
+        Now more flexible - returns any available content rather than requiring 
+        specific financial_data structure.
         
         Args:
             document_id: ID of the document
-            
+                
         Returns:
-            Dictionary containing financial data
+            Dictionary containing document content suitable for analysis
         """
         document = await self.document_repository.get_document(document_id)
         
-        if document and document.extracted_data and "financial_data" in document.extracted_data:
-            return document.extracted_data["financial_data"]
+        if not document:
+            logger.warning(f"Document {document_id} not found")
+            return {"error": "Document not found"}
         
-        # Return empty financial data structure if not found
+        result = {}
+        
+        # Add financial_data if it exists
+        if document.extracted_data and isinstance(document.extracted_data, dict) and "financial_data" in document.extracted_data:
+            result["financial_data"] = document.extracted_data["financial_data"]
+        
+        # Add raw_text if available
+        if document.raw_text:
+            result["raw_text"] = document.raw_text
+            logger.info(f"Found {len(document.raw_text)} characters of raw text in document {document_id}")
+        elif document.extracted_data and isinstance(document.extracted_data, dict) and "raw_text" in document.extracted_data:
+            result["raw_text"] = document.extracted_data["raw_text"]
+            logger.info(f"Found {len(document.extracted_data['raw_text'])} characters of raw text in extracted_data")
+        
+        # If we have any content, consider it valid
+        if result:
+            result["has_content"] = True
+            return result
+        
+        # Return empty structure if no content found
+        logger.warning(f"No analyzable content found in document {document_id}")
         return {
+            "has_content": False,
+            "raw_text": f"No content extracted from document {document_id}. The document may be empty or contain only images.",
             "revenue": {},
             "expenses": {},
             "profit": {},
@@ -232,13 +324,13 @@ class DocumentService:
             "confidence_score": document.confidence_score or 0.0
         }
 
-    async def extract_structured_financial_data(self, document_id: str, text: str) -> Dict[str, Any]:
+    async def extract_structured_financial_data(self, document_id: str, text: str = None) -> Dict[str, Any]:
         """
         Extract structured financial data from document text using Claude and update the document.
         
         Args:
             document_id: ID of the document to update
-            text: Raw document text to analyze
+            text: Raw document text to analyze. If None, will be retrieved from the document.
             
         Returns:
             Dictionary with extraction results
@@ -246,8 +338,37 @@ class DocumentService:
         try:
             logger.info(f"Extracting structured financial data for document {document_id}")
             
-            # Call Claude service to extract structured data
-            structured_data = await self.claude_service.extract_structured_financial_data(text)
+            # Get document from database to retrieve raw PDF data if available
+            document = await self.document_repository.get_document(document_id)
+            if not document:
+                return {"error": f"Document {document_id} not found"}
+            
+            # If text not provided, use the one from the document
+            if text is None and document.raw_text:
+                text = document.raw_text
+                logger.info(f"Using document's raw text ({len(text)} chars) for financial data extraction")
+            elif text is None:
+                return {"error": "No text available for document analysis"}
+            
+            # Get raw PDF data from storage if available
+            pdf_data = None
+            filename = document.filename if document else f"document_{document_id}.pdf"
+            
+            try:
+                # Try to get the raw PDF data from storage
+                pdf_data = await self.document_repository.get_document_binary(document_id)
+                if pdf_data:
+                    logger.info(f"Retrieved raw PDF data ({len(pdf_data)} bytes) for financial data extraction")
+            except Exception as e:
+                logger.warning(f"Could not retrieve PDF binary data: {str(e)}")
+                # Continue with text-only extraction if PDF data is not available
+            
+            # Call Claude service to extract structured data - passing both text and PDF data
+            structured_data = await self.claude_service.extract_structured_financial_data(
+                text=text,
+                pdf_data=pdf_data,
+                filename=filename
+            )
             
             # If error in extraction, return it
             if structured_data.get("error"):

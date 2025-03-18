@@ -20,7 +20,7 @@ class LangChainService:
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
         
-        self.model = os.getenv("CLAUDE_MODEL", "claude-3-sonnet-20240229")
+        self.model = os.getenv("CLAUDE_MODEL", "claude-3-sonnet-latest")
         self.llm = ChatAnthropic(
             model=self.model,
             temperature=0.2,

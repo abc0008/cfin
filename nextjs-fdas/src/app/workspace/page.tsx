@@ -1,49 +1,112 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs'
 import { FileText, BarChart2, Upload, FileUp, Zap, ChevronRight, FileSearch } from 'lucide-react'
 import { ChatInterface } from '../../components/chat/ChatInterface'
-import { UploadForm } from '../../components/UploadForm'
+import { UploadForm } from '../../components/document/UploadForm'
+import dynamic from 'next/dynamic'
 import { ProcessedDocument } from '@/types'
+import { conversationApi } from '@/lib/api/conversation'
+
+// Import PDFViewer component with dynamic import to avoid SSR issues
+const PDFViewer = dynamic(
+  () => import('../../components/document/PDFViewer').then(mod => mod.PDFViewer),
+  { ssr: false }
+)
 
 export default function Workspace() {
   const [activeTab, setActiveTab] = useState<'document' | 'analysis'>('document')
   const [messages, setMessages] = useState([]);
   const [selectedDocument, setSelectedDocument] = useState<ProcessedDocument | null>(null);
   const [showUploadForm, setShowUploadForm] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Initialize conversation session when component mounts
+  useEffect(() => {
+    const initSession = async () => {
+      try {
+        setIsLoading(true);
+        // Create a new conversation session
+        const response = await conversationApi.createConversation('New Conversation');
+        setSessionId(response.session_id);
+        console.log('Created conversation session: – "' + response.session_id + '"');
+      } catch (error) {
+        console.error('Error initializing session:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    initSession();
+  }, []);
 
   const handleSendMessage = async (messageText: string) => {
-    // This is a placeholder - in a real app, this would call an API
-    console.log("Sending message:", messageText);
-    // Mock adding a user message
-    const userMessage = {
-      id: `user-${Date.now()}`,
-      sessionId: 'demo-session',
-      timestamp: new Date().toISOString(),
-      role: 'user',
-      content: messageText,
-      referencedDocuments: [],
-      referencedAnalyses: []
-    };
-    
-    // Add the user message
-    setMessages((prev: any) => [...prev, userMessage]);
-    
-    // Mock adding a response after a delay
-    setTimeout(() => {
-      const assistantMessage = {
-        id: `assistant-${Date.now()}`,
-        sessionId: 'demo-session',
+    try {
+      // Show user message immediately
+      const userMessage = {
+        id: `user-${Date.now()}`,
+        sessionId: sessionId || 'demo-session',
         timestamp: new Date().toISOString(),
-        role: 'assistant',
-        content: `This is a mock response to: "${messageText}".\n\nIn a real implementation, this would call the backend API.`,
+        role: 'user',
+        content: messageText,
+        referencedDocuments: selectedDocument ? [selectedDocument.metadata.id] : [],
+        referencedAnalyses: []
+      };
+      
+      // Add the user message
+      setMessages((prev: any) => [...prev, userMessage]);
+      
+      // Set loading state
+      setIsLoading(true);
+      
+      // If we have a valid session ID, use the API to get a response
+      if (sessionId) {
+        const documentIds = selectedDocument ? [selectedDocument.metadata.id] : [];
+        
+        // Get response from the actual API
+        const response = await conversationApi.sendMessage(
+          sessionId,
+          messageText,
+          documentIds
+        );
+        
+        // Add the AI response to messages
+        setMessages((prev: any) => [...prev, response]);
+      } else {
+        // Fallback to mock response if no session ID (should not happen if API is working)
+        setTimeout(() => {
+          const assistantMessage = {
+            id: `assistant-${Date.now()}`,
+            sessionId: 'demo-session',
+            timestamp: new Date().toISOString(),
+            role: 'assistant',
+            content: `This is a mock response to: "${messageText}".\n\nI can't connect to the AI service right now. Please check your connection.`,
+            referencedDocuments: selectedDocument ? [selectedDocument.metadata.id] : [],
+            referencedAnalyses: []
+          };
+          
+          setMessages((prev: any) => [...prev, assistantMessage]);
+        }, 1000);
+      }
+    } catch (error) {
+      console.error("Error sending message:", error);
+      // Add error message to chat
+      const errorMessage = {
+        id: `system-${Date.now()}`,
+        sessionId: sessionId || 'demo-session',
+        timestamp: new Date().toISOString(),
+        role: 'system',
+        content: `Error sending message: ${error instanceof Error ? error.message : 'Unknown error'}`,
         referencedDocuments: [],
         referencedAnalyses: []
       };
       
-      setMessages((prev: any) => [...prev, assistantMessage]);
-    }, 1000);
+      setMessages((prev: any) => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleUploadSuccess = (document: ProcessedDocument) => {
@@ -53,7 +116,7 @@ export default function Workspace() {
     // Add a system message about the successful upload
     const uploadSuccessMessage = {
       id: `system-${Date.now()}`,
-      sessionId: 'demo-session',
+      sessionId: sessionId || 'demo-session',
       timestamp: new Date().toISOString(),
       role: 'system',
       content: `Successfully uploaded: ${document.metadata.filename}`,
@@ -68,7 +131,7 @@ export default function Workspace() {
     // Add an error message to the chat
     const errorMessage = {
       id: `system-${Date.now()}`,
-      sessionId: 'demo-session',
+      sessionId: sessionId || 'demo-session',
       timestamp: new Date().toISOString(),
       role: 'system',
       content: `Error uploading document: ${error.message}`,
@@ -101,8 +164,10 @@ export default function Workspace() {
           </div>
           <div className="flex-1 overflow-hidden">
             <ChatInterface 
-              messages={messages}
-              onSendMessage={handleSendMessage}
+              messages={messages} 
+              onSendMessage={handleSendMessage} 
+              activeDocuments={selectedDocument ? [selectedDocument.metadata.id] : []}
+              isLoading={isLoading}
             />
           </div>
         </div>
@@ -141,6 +206,7 @@ export default function Workspace() {
                     <UploadForm 
                       onUploadSuccess={handleUploadSuccess}
                       onUploadError={handleUploadError}
+                      sessionId={sessionId || undefined}
                     />
                     <button
                       onClick={() => setShowUploadForm(false)}
@@ -150,40 +216,18 @@ export default function Workspace() {
                     </button>
                   </div>
                 ) : selectedDocument ? (
-                  <div className="h-full p-4">
-                    {/* PDF Viewer would go here - for now just show document info */}
-                    <div className="bg-white p-6 rounded-lg border border-indigo-100">
-                      <div className="flex items-center mb-4">
-                        <div className="bg-indigo-100 p-2 rounded-full mr-3">
-                          <FileText className="h-5 w-5 text-indigo-600" />
-                        </div>
-                        <h3 className="font-semibold text-indigo-700">{selectedDocument.metadata.filename}</h3>
-                      </div>
-                      <p className="text-sm text-gray-500 mb-2">
-                        Uploaded: {new Date(selectedDocument.metadata.uploadTimestamp).toLocaleString()}
-                      </p>
-                      <p className="text-sm text-gray-500 mb-4">
-                        Status: <span className="text-indigo-600 font-medium">{selectedDocument.processingStatus}</span>
-                      </p>
-                      
-                      <div className="mt-6 pt-4 border-t border-gray-100">
-                        <h4 className="text-sm font-medium text-gray-700 mb-2">Document Information</h4>
-                        <ul className="space-y-2 text-sm text-gray-600">
-                          <li className="flex items-center">
-                            <Zap className="h-3 w-3 text-indigo-500 mr-2" />
-                            Size: {Math.round(selectedDocument.metadata.fileSize / 1024)} KB
-                          </li>
-                          <li className="flex items-center">
-                            <Zap className="h-3 w-3 text-indigo-500 mr-2" />
-                            Type: {selectedDocument.contentType || 'Document'}
-                          </li>
-                          <li className="flex items-center">
-                            <Zap className="h-3 w-3 text-indigo-500 mr-2" />
-                            PDF viewer implementation coming soon
-                          </li>
-                        </ul>
-                      </div>
-                    </div>
+                  <div className="h-full">
+                    <PDFViewer 
+                      document={selectedDocument}
+                      onCitationCreate={(citation) => {
+                        console.log('Citation created:', citation);
+                        // You can add citation handling logic here
+                      }}
+                      onCitationClick={(citation) => {
+                        console.log('Citation clicked:', citation);
+                        // You can add citation click handling logic here
+                      }}
+                    />
                   </div>
                 ) : (
                   <div className="h-full flex items-center justify-center">

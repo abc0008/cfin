@@ -516,7 +516,7 @@ class ClaudeService:
         }
         
         data = {
-            "model": "claude-3-sonnet-20240229",
+            "model": "claude-3-sonnet-latest",
             "max_tokens": 4000,
             "messages": [
                 {
