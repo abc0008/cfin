@@ -27,6 +27,11 @@ class StorageService(ABC):
         """Delete a file from storage."""
         pass
     
+    @abstractmethod
+    def get_file_path(self, file_id: str) -> str:
+        """Get the physical path to a file in storage."""
+        pass
+    
     @staticmethod
     def get_storage_service() -> 'StorageService':
         """Factory method to get the appropriate storage service."""
@@ -90,6 +95,10 @@ class LocalStorageService(StorageService):
         except Exception as e:
             logger.error(f"Error deleting file {file_id}: {str(e)}")
             return False
+    
+    def get_file_path(self, file_id: str) -> str:
+        """Get the physical path to a file in local storage."""
+        return os.path.join(self.upload_dir, file_id)
 
 
 class S3StorageService(StorageService):
@@ -156,3 +165,13 @@ class S3StorageService(StorageService):
         except Exception as e:
             logger.error(f"Error deleting file {file_id} from S3: {str(e)}")
             return False
+    
+    def get_file_path(self, file_id: str) -> str:
+        """
+        Get the path to a file in S3 storage.
+        
+        Note: For S3, there's no direct file path. This returns a URL that can
+        be used for accessing the file, but it's not a local path.
+        """
+        # For S3, we don't have a physical path, so return an S3 URL
+        return f"s3://{self.bucket_name}/{file_id}"

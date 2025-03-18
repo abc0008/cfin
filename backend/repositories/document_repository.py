@@ -84,6 +84,94 @@ class DocumentRepository:
         )
         return result.scalars().first()
     
+    async def get_document_content(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the content of a document by ID.
+        
+        Args:
+            document_id: ID of the document
+            
+        Returns:
+            Document content dictionary with raw text and file content if found, None otherwise
+        """
+        document = await self.get_document(document_id)
+        if not document:
+            logger.warning(f"Document {document_id} not found in database")
+            return None
+            
+        try:
+            # Get the file path
+            file_path = f"{document_id}.pdf"
+            logger.info(f"Retrieving document content using file path: {file_path}")
+            
+            # Get the raw PDF content from storage
+            logger.info(f"Requesting file from storage service for document {document_id}")
+            pdf_content = await self.storage_service.get_file(file_path)
+            
+            # Log PDF content retrieval success
+            if pdf_content:
+                pdf_size = len(pdf_content) if pdf_content else 0
+                logger.info(f"Retrieved PDF content for document {document_id}: {pdf_size} bytes")
+            
+            # Prepare the response data
+            content_data = {
+                "content": pdf_content,
+                "id": document_id,
+                "filename": document.filename
+            }
+            
+            # Add raw text if available - first try document.raw_text, then extracted_data
+            logger.info(f"[PDF-VISIBILITY-FIX] Document {document_id} raw_text check: present={document.raw_text is not None}")
+            logger.info(f"[PDF-VISIBILITY-FIX] Document {document_id} extracted_data check: present={document.extracted_data is not None}, type={type(document.extracted_data).__name__ if document.extracted_data else 'None'}")
+            
+            if document.extracted_data:
+                if isinstance(document.extracted_data, dict):
+                    logger.info(f"[PDF-VISIBILITY-FIX] Document {document_id} extracted_data keys: {list(document.extracted_data.keys())}")
+                    if "raw_text" in document.extracted_data:
+                        logger.info(f"[PDF-VISIBILITY-FIX] Document {document_id} has raw_text in extracted_data ({len(str(document.extracted_data['raw_text']))} chars)")
+                    else:
+                        logger.info(f"[PDF-VISIBILITY-FIX] Document {document_id} missing raw_text in extracted_data")
+                else:
+                    logger.info(f"[PDF-VISIBILITY-FIX] Document {document_id} extracted_data is not a dictionary")
+            
+            if document.raw_text:
+                content_data["raw_text"] = document.raw_text
+                logger.info(f"[PDF-VISIBILITY-FIX] Using document.raw_text for document {document_id}: {len(document.raw_text)} characters")
+            elif document.extracted_data and isinstance(document.extracted_data, dict) and "raw_text" in document.extracted_data:
+                # Extract raw text from extracted_data as fallback
+                content_data["raw_text"] = document.extracted_data["raw_text"]
+                logger.info(f"[PDF-VISIBILITY-FIX] Using extracted_data.raw_text for document {document_id}: {len(str(document.extracted_data['raw_text']))} characters")
+            else:
+                logger.warning(f"[PDF-VISIBILITY-FIX] No raw text available for document {document_id} - all extraction attempts failed")
+                content_data["raw_text"] = "Document text not yet extracted"
+            
+            # Add extracted data if available
+            if document.extracted_data:
+                content_data["extracted_data"] = document.extracted_data
+                logger.info(f"Extracted data available for document {document_id}: {list(document.extracted_data.keys()) if isinstance(document.extracted_data, dict) else 'not a dict'}")
+            else:
+                logger.warning(f"No extracted data available for document {document_id}")
+                content_data["extracted_data"] = {}
+            
+            # Log content retrieval success
+            logger.info(f"Successfully retrieved content for document {document_id}")
+            
+            return content_data
+        except Exception as e:
+            logger.error(f"Error retrieving document content for {document_id}: {str(e)}")
+            
+            # Try to return just the document fields even if file retrieval failed
+            if document:
+                logger.info(f"Returning partial content for document {document_id} (file retrieval failed)")
+                return {
+                    "id": document_id,
+                    "filename": document.filename,
+                    "raw_text": document.raw_text or "Document text not available",
+                    "extracted_data": document.extracted_data or {}
+                }
+            
+            return None
+    
     async def list_documents(self, user_id: str, limit: int = 10, offset: int = 0) -> List[Document]:
         """
         List documents for a user.
@@ -422,11 +510,28 @@ class DocumentRepository:
         )
     
     def citation_to_api_schema(self, citation: Citation) -> CitationSchema:
-        """Convert a database citation model to an API schema."""
+        """Convert a database Citation to an API CitationSchema."""
         return CitationSchema(
-            id=citation.id,
-            page=citation.page,
+            id=str(citation.id),
             text=citation.text,
-            section=citation.section,
-            bounding_box=citation.bounding_box
+            documentId=str(citation.document_id),
+            page=citation.page,
+            highlightId=citation.highlight_id,
+            rects=citation.bounding_box if citation.bounding_box else [],
+            messageId=str(citation.message_id) if citation.message_id else None,
+            analysisId=str(citation.analysis_id) if citation.analysis_id else None,
         )
+        
+    def get_document_file_path(self, document_id: str) -> str:
+        """
+        Get the physical file path for a document.
+        
+        Args:
+            document_id: ID of the document
+            
+        Returns:
+            Absolute path to the document file
+        """
+        # The storage service uses the document ID with a .pdf extension as the file ID
+        file_id = f"{document_id}.pdf"
+        return self.storage_service.get_file_path(file_id)
