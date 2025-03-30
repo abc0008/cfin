@@ -178,84 +178,90 @@ async def get_conversation_history(
     user_id: str = Depends(get_current_user_id)
 ):
     """
-    Retrieve conversation history including citation links.
+    Get the history of messages for a conversation.
+    
+    Args:
+        conversation_id: ID of the conversation
+        limit: Maximum number of messages to return
+        offset: Starting offset for pagination
+        
+    Returns:
+        List of messages in the conversation
     """
-    try:
-        # Check if the conversation exists and belongs to the user
-        conversation = await conversation_service.get_conversation(conversation_id)
-        if not conversation:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Conversation {conversation_id} not found"
-            )
+    # Check if the conversation exists and belongs to the user
+    conversation = await conversation_service.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    if conversation.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this conversation")
+    
+    # Get the conversation messages
+    messages = await conversation_service.get_conversation_messages(
+        conversation_id=conversation_id,
+        limit=limit,
+        offset=offset
+    )
+    
+    # Convert messages to API response format
+    api_messages = []
+    
+    for msg in messages:
+        # Get citations for this message
+        citations = await conversation_service.conversation_repository.get_message_citations(msg.id)
         
-        if conversation.user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You don't have permission to access this conversation"
-            )
-        
-        # Get messages from the database
-        messages = await conversation_service.get_conversation_messages(
-            conversation_id=conversation_id,
-            limit=limit,
-            offset=offset
-        )
-        
-        # Convert to API message models
-        api_messages = []
-        for msg in messages:
-            # Get citations for this message
-            citations = await conversation_service.conversation_repository.get_message_citations(msg.id)
+        # Convert citations to Citation objects
+        citation_objects = []
+        for citation in citations:
+            # Get the document for this citation
+            document = await conversation_service.document_repository.get_document(citation.document_id)
+            doc_title = document.filename if document else "Unknown Document"
             
-            # Convert citations to Citation objects
-            citation_objects = []
-            for citation in citations:
-                # Get the document for this citation
-                document = await conversation_service.document_repository.get_document(citation.document_id)
-                doc_title = document.filename if document else "Unknown Document"
-                
-                citation_objects.append(
-                    Citation(
-                        id=citation.id,
-                        document_id=citation.document_id,
-                        document_title=doc_title,
-                        content=citation.content,
-                        metadata=citation.metadata or {},
-                        type=citation.metadata.get("type", "unknown") if citation.metadata else "unknown"
-                    )
-                )
-            
-            # Create content blocks if available
-            content_blocks = None
-            if hasattr(msg, 'content_blocks') and msg.content_blocks:
-                content_blocks = msg.content_blocks
-            
-            api_messages.append(
-                Message(
-                    id=msg.id,
-                    session_id=msg.conversation_id,
-                    timestamp=msg.created_at,
-                    role=MessageRole(msg.role),
-                    content=msg.content,
-                    referenced_documents=[],  # We don't store this directly in the database
-                    referenced_analyses=[],   # We don't store this directly in the database
-                    citation_links=[citation.id for citation in citations],
-                    citations=citation_objects,
-                    content_blocks=content_blocks
+            citation_objects.append(
+                Citation(
+                    id=citation.id,
+                    document_id=citation.document_id,
+                    document_title=doc_title,
+                    content=citation.content,
+                    metadata=citation.metadata or {},
+                    type=citation.metadata.get("type", "unknown") if citation.metadata else "unknown"
                 )
             )
         
-        return api_messages
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
-    except Exception as e:
-        logger.error(f"Error getting conversation history: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error getting conversation history: {str(e)}"
+        # Create content blocks if available
+        content_blocks = None
+        if hasattr(msg, 'content_blocks') and msg.content_blocks:
+            content_blocks = msg.content_blocks
+        
+        # Get analysis blocks for this message
+        analysis_blocks = []
+        if hasattr(msg, 'analysis_blocks'):
+            for block in msg.analysis_blocks:
+                analysis_blocks.append({
+                    "id": block.id,
+                    "block_type": block.block_type,
+                    "title": block.title,
+                    "content": block.content,
+                    "created_at": block.created_at
+                })
+        
+        api_messages.append(
+            Message(
+                id=msg.id,
+                session_id=msg.conversation_id,
+                timestamp=msg.created_at,
+                role=MessageRole(msg.role),
+                content=msg.content,
+                referenced_documents=[],  # We don't store this directly in the database
+                referenced_analyses=[],   # We don't store this directly in the database
+                citation_links=[citation.id for citation in citations],
+                citations=citation_objects,
+                content_blocks=content_blocks,
+                analysis_blocks=analysis_blocks
+            )
         )
+    
+    return api_messages
 
 @router.get("", response_model=List[Dict[str, Any]])
 async def list_conversations(

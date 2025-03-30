@@ -104,14 +104,22 @@ export function MarkdownRenderer({
             {referencedParts.map((part, index) => 
               typeof part === 'string' 
                 ? <React.Fragment key={index}>{processFinancialTerms(part)}</React.Fragment>
-                : part
+                : <span key={index}>{part}</span>
             )}
           </>
         );
       }
       
       // If financial terms disabled, just return the referenced parts
-      return <>{referencedParts}</>;
+      return (
+        <>
+          {referencedParts.map((part, index) => 
+            typeof part === 'string' 
+              ? part 
+              : <span key={index}>{part}</span>
+          )}
+        </>
+      );
     }
 
     // Split text and insert citation components
@@ -131,14 +139,14 @@ export function MarkdownRenderer({
               if (typeof part === 'string') {
                 parts.push(<React.Fragment key={`before-${index}-${i}`}>{processFinancialTerms(part)}</React.Fragment>);
               } else {
-                parts.push(React.cloneElement(part as React.ReactElement, { key: `before-${index}-${i}` }));
+                parts.push(<span key={`before-${index}-${i}`}>{part}</span>);
               }
             });
           } else {
             parts.push(...referencedParts.map((part, i) => 
               typeof part === 'string' 
                 ? part 
-                : React.cloneElement(part as React.ReactElement, { key: `before-${index}-${i}` })
+                : <span key={`before-${index}-${i}`}>{part}</span>
             ));
           }
         } else {
@@ -147,14 +155,14 @@ export function MarkdownRenderer({
       }
 
       parts.push(
-        <button
+        <span
           key={citation.id}
           className="inline-flex items-center px-1 py-0.5 rounded bg-yellow-100 text-yellow-800 hover:bg-yellow-200 border border-yellow-200 cursor-pointer"
           onClick={() => handleCitationClick(citation)}
         >
           <span>{citation.text}</span>
           <ExternalLink className="ml-1 h-3 w-3" />
-        </button>
+        </span>
       );
 
       lastIndex = index + citation.text.length;
@@ -171,14 +179,14 @@ export function MarkdownRenderer({
             if (typeof part === 'string') {
               parts.push(<React.Fragment key={`after-${i}`}>{processFinancialTerms(part)}</React.Fragment>);
             } else {
-              parts.push(React.cloneElement(part as React.ReactElement, { key: `after-${i}` }));
+              parts.push(<span key={`after-${i}`}>{part}</span>);
             }
           });
         } else {
           parts.push(...referencedParts.map((part, i) => 
             typeof part === 'string' 
               ? part 
-              : React.cloneElement(part as React.ReactElement, { key: `after-${i}` })
+              : <span key={`after-${i}`}>{part}</span>
           ));
         }
       } else {
@@ -223,6 +231,30 @@ export function MarkdownRenderer({
     },
     // Process text nodes to find and highlight citations
     p({ children, ...props }) {
+      // Check for potentially problematic children that would cause hydration errors
+      const hasComplexContent = React.Children.toArray(children).some(child => 
+        React.isValidElement(child) && 
+        (child.type === 'div' || child.type === 'p' || 
+         child.type === 'h1' || child.type === 'h2' || 
+         child.type === 'h3' || child.type === 'h4' || 
+         child.type === 'h5' || child.type === 'h6')
+      );
+
+      // If potentially problematic content is detected, use a div instead of p
+      if (hasComplexContent) {
+        return (
+          <div {...props} className="mb-4">
+            {React.Children.map(children, child => {
+              if (typeof child === 'string') {
+                return processCitations(child);
+              }
+              return child;
+            })}
+          </div>
+        );
+      }
+
+      // Regular rendering if no hydration issues detected
       return (
         <p {...props}>
           {React.Children.map(children, child => {

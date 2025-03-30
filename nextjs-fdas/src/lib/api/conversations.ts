@@ -124,7 +124,9 @@ export const conversationsApi = {
         content: msg.content,
         referencedDocuments: msg.referencedDocuments || msg.referenced_documents || [],
         referencedAnalyses: msg.referencedAnalyses || msg.referenced_analyses || [],
-        citations: msg.citations || []
+        citations: msg.citations || [],
+        content_blocks: msg.content_blocks || [],
+        analysis_blocks: msg.analysis_blocks || []
       }));
     } catch (error) {
       console.error('Error getting conversation history:', error);

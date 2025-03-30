@@ -1,13 +1,21 @@
 # Financial Document Analysis System (FDAS)
 
-FDAS is an AI-powered application that analyzes financial PDFs using an interactive chatbot and canvas visualization. The system leverages Claude API for PDF processing and citation extraction, with LangChain/LangGraph for AI orchestration.
+FDAS is an AI-powered application that analyzes financial PDFs using an interactive chatbot and canvas visualization. The system leverages Claude API's native PDF processing and citation extraction capabilities, with LangChain/LangGraph for AI orchestration.
 
 ## Project Structure
 
 The project consists of two main parts:
 
 1. **Frontend**: React/TypeScript application with interactive chat, document viewer, and visualization components
-2. **Backend**: FastAPI server with PDF processing, AI orchestration, and database integration
+2. **Backend**: FastAPI server with direct PDF processing via Claude API, AI orchestration, and database integration
+
+## PDF Processing Features
+
+- Direct PDF processing using Claude's built-in capabilities (no OCR preprocessing required)
+- Native citation extraction and linking
+- Automatic financial data recognition and extraction
+- Support for complex financial document structures
+- Fallback OCR processing only if needed
 
 ## Application Flow
 Okay, I understand. You're looking for a Mermaid diagram that illustrates the *application flow* during user interaction, showing how the frontend and backend work together. Here's a Mermaid diagram focusing on the user's journey:

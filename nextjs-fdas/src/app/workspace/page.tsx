@@ -6,8 +6,11 @@ import { FileText, BarChart2, Upload, FileUp, Zap, ChevronRight, FileSearch } fr
 import { ChatInterface } from '../../components/chat/ChatInterface'
 import { UploadForm } from '../../components/document/UploadForm'
 import dynamic from 'next/dynamic'
-import { ProcessedDocument } from '@/types'
+import { ProcessedDocument, AnalysisResult } from '@/types'
 import { conversationApi } from '@/lib/api/conversation'
+import { analysisApi } from '@/lib/api/analysis'
+import Canvas from '@/components/visualization/Canvas'
+import { AnalysisControls } from '@/components/analysis/AnalysisControls'
 
 // Import PDFViewer component with dynamic import to avoid SSR issues
 const PDFViewer = dynamic(
@@ -22,88 +25,201 @@ export default function Workspace() {
   const [showUploadForm, setShowUploadForm] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [analysisResults, setAnalysisResults] = useState<AnalysisResult[]>([]);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState<boolean>(false);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
 
   // Initialize conversation session when component mounts
   useEffect(() => {
+    let mounted = true;
+    let sessionInitialized = false;
+
     const initSession = async () => {
-      try {
-        setIsLoading(true);
-        // Create a new conversation session
-        const response = await conversationApi.createConversation('New Conversation');
-        setSessionId(response.session_id);
-        console.log('Created conversation session: – "' + response.session_id + '"');
-      } catch (error) {
-        console.error('Error initializing session:', error);
-      } finally {
-        setIsLoading(false);
+      // Only create a session if we don't have one and haven't tried to initialize yet
+      if (!sessionId && !sessionInitialized) {
+        sessionInitialized = true;
+        try {
+          setIsLoading(true);
+          // Create a new conversation session
+          const response = await conversationApi.createConversation('New Conversation');
+          if (mounted) {
+            setSessionId(response.session_id);
+            console.log('Created conversation session:', response.session_id);
+          }
+        } catch (error) {
+          console.error('Error initializing session:', error);
+          if (mounted) {
+            setMessages(prev => [...prev, {
+              id: `system-${Date.now()}`,
+              role: 'system',
+              content: 'Error initializing chat session. Please refresh the page.',
+              timestamp: new Date().toISOString(),
+              metadata: {
+                referencedDocuments: [],
+                referencedAnalyses: []
+              }
+            }]);
+          }
+        } finally {
+          if (mounted) {
+            setIsLoading(false);
+          }
+        }
       }
     };
 
     initSession();
-  }, []);
+
+    return () => {
+      mounted = false;
+    };
+  }, []); // Remove sessionId dependency to prevent multiple initializations
+
+  // Run financial analysis when a document is selected
+  useEffect(() => {
+    const runAnalysis = async () => {
+      if (!selectedDocument) return;
+      
+      // Check if we've already analyzed this document
+      if (analysisResults.some(result => result.documentIds.includes(selectedDocument.metadata.id))) {
+        console.log('Document already analyzed');
+        return;
+      }
+      
+      setAnalysisLoading(true);
+      
+      try {
+        const result = await analysisApi.runAnalysis(
+          [selectedDocument.metadata.id],
+          'basic_financial',
+          {}
+        );
+        
+        setAnalysisResults(prev => [...prev, result]);
+        
+        let analysisMessage = '';
+        // Check if this is a failed analysis (local ID, no metrics, has error insights)
+        const isFailedAnalysis = (result.id.startsWith('analysis-') || result.id.startsWith('local-')) && 
+                                (!result.metrics || result.metrics.length === 0) &&
+                                result.insights.some(insight => 
+                                  insight.includes('Unable to perform financial analysis') || 
+                                  insight.includes('document does not contain structured financial data')
+                                );
+                                    
+        if (isFailedAnalysis) {
+          analysisMessage = `I attempted to analyze the financial data in "${selectedDocument.filename}" but ${result.insights[0].toLowerCase()}`;
+        } else {
+          analysisMessage = `I've completed the financial analysis for "${selectedDocument.filename}". You can see the results in the Analysis tab.`;
+        }
+        
+        // Add system message about analysis completion
+        setMessages(prev => {
+          const newSystemMessage: Message = {
+            id: `msg-${Date.now()}`,
+            role: 'system',
+            content: analysisMessage,
+            timestamp: new Date().toISOString(),
+            metadata: {
+              referencedDocuments: [selectedDocument.metadata.id],
+              // Only reference the analysis if it's not a failed analysis
+              referencedAnalyses: isFailedAnalysis ? [] : [result.id],
+            }
+          };
+          return [...prev, newSystemMessage];
+        });
+      } catch (error) {
+        console.error('Error running analysis:', error);
+        
+        // Add error message to chat
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+        setMessages(prev => {
+          const newSystemMessage: Message = {
+            id: `msg-${Date.now()}`,
+            role: 'system',
+            content: `Error performing analysis: ${errorMsg}`,
+            timestamp: new Date().toISOString(),
+            metadata: {
+              referencedDocuments: [selectedDocument.metadata.id],
+              referencedAnalyses: [],
+            }
+          };
+          return [...prev, newSystemMessage];
+        });
+      } finally {
+        setAnalysisLoading(false);
+      }
+    };
+    
+    if (selectedDocument && !analysisResults.some(result => 
+      result.documentIds.includes(selectedDocument.metadata.id)
+    )) {
+      runAnalysis();
+    }
+  }, [selectedDocument, sessionId, analysisResults]);
 
   const handleSendMessage = async (messageText: string) => {
+    if (!sessionId) {
+      console.error("No valid session ID available");
+      const errorMessage = {
+        id: `system-${Date.now()}`,
+        role: 'system',
+        content: 'Error: No active session. Please refresh the page.',
+        timestamp: new Date().toISOString(),
+        metadata: {
+          referencedDocuments: [],
+          referencedAnalyses: []
+        }
+      };
+      setMessages(prev => [...prev, errorMessage]);
+      return;
+    }
+
     try {
       // Show user message immediately
       const userMessage = {
         id: `user-${Date.now()}`,
-        sessionId: sessionId || 'demo-session',
-        timestamp: new Date().toISOString(),
         role: 'user',
         content: messageText,
-        referencedDocuments: selectedDocument ? [selectedDocument.metadata.id] : [],
-        referencedAnalyses: []
+        timestamp: new Date().toISOString(),
+        metadata: {
+          referencedDocuments: selectedDocument ? [selectedDocument.metadata.id] : [],
+          referencedAnalyses: []
+        }
       };
       
       // Add the user message
-      setMessages((prev: any) => [...prev, userMessage]);
+      setMessages(prev => [...prev, userMessage]);
       
       // Set loading state
       setIsLoading(true);
       
-      // If we have a valid session ID, use the API to get a response
-      if (sessionId) {
-        const documentIds = selectedDocument ? [selectedDocument.metadata.id] : [];
-        
-        // Get response from the actual API
-        const response = await conversationApi.sendMessage(
-          sessionId,
-          messageText,
-          documentIds
-        );
-        
-        // Add the AI response to messages
-        setMessages((prev: any) => [...prev, response]);
-      } else {
-        // Fallback to mock response if no session ID (should not happen if API is working)
-        setTimeout(() => {
-          const assistantMessage = {
-            id: `assistant-${Date.now()}`,
-            sessionId: 'demo-session',
-            timestamp: new Date().toISOString(),
-            role: 'assistant',
-            content: `This is a mock response to: "${messageText}".\n\nI can't connect to the AI service right now. Please check your connection.`,
-            referencedDocuments: selectedDocument ? [selectedDocument.metadata.id] : [],
-            referencedAnalyses: []
-          };
-          
-          setMessages((prev: any) => [...prev, assistantMessage]);
-        }, 1000);
-      }
+      const documentIds = selectedDocument ? [selectedDocument.metadata.id] : [];
+      
+      // Get response from the actual API
+      const response = await conversationApi.sendMessage(
+        sessionId,
+        messageText,
+        documentIds
+      );
+      
+      // Add the AI response to messages
+      setMessages(prev => [...prev, response]);
     } catch (error) {
       console.error("Error sending message:", error);
       // Add error message to chat
       const errorMessage = {
         id: `system-${Date.now()}`,
-        sessionId: sessionId || 'demo-session',
-        timestamp: new Date().toISOString(),
         role: 'system',
         content: `Error sending message: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        referencedDocuments: [],
-        referencedAnalyses: []
+        timestamp: new Date().toISOString(),
+        metadata: {
+          referencedDocuments: [],
+          referencedAnalyses: []
+        }
       };
       
-      setMessages((prev: any) => [...prev, errorMessage]);
+      setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
     }
@@ -140,6 +256,90 @@ export default function Workspace() {
     };
     
     setMessages((prev: any) => [...prev, errorMessage]);
+  };
+
+  // Handle citation clicks from analysis or chat
+  const handleCitationClick = (highlightId: string) => {
+    setHighlightId(highlightId);
+    setActiveTab('document'); // Switch to document tab to show the citation
+  };
+
+  // Add this new function to run manual analysis
+  const runManualAnalysis = async (documentId: string, analysisType: string, knowledgeBase?: string, userQuery?: string) => {
+    if (!documentId) return;
+    
+    setAnalysisLoading(true);
+    setAnalysisError(null);
+    
+    try {
+      // Setup parameters with custom knowledge base and query if provided
+      const parameters: Record<string, any> = {};
+      if (knowledgeBase) parameters.knowledge_base = knowledgeBase;
+      if (userQuery) parameters.user_query = userQuery;
+      
+      const result = await analysisApi.runAnalysis(
+        [documentId],
+        analysisType,
+        parameters
+      );
+      
+      // Add the new result and update messages
+      setAnalysisResults(prev => {
+        // If we already have a result for this analysis type and document,
+        // replace it instead of adding a new one
+        const existingIndex = prev.findIndex(r => 
+          r.documentIds.includes(documentId) && r.analysisType === analysisType
+        );
+        
+        if (existingIndex >= 0) {
+          const newResults = [...prev];
+          newResults[existingIndex] = result;
+          return newResults;
+        }
+        
+        // Otherwise add the new result
+        return [...prev, result];
+      });
+      
+      // Add system message about analysis completion
+      setMessages(prev => {
+        const newSystemMessage = {
+          id: `msg-${Date.now()}`,
+          role: 'system',
+          content: `I've completed the ${analysisType} analysis${userQuery ? ' for: "' + userQuery + '"' : ''}. You can see the results in the Analysis tab.`,
+          timestamp: new Date().toISOString(),
+          metadata: {
+            referencedDocuments: [documentId],
+            referencedAnalyses: [result.id],
+          }
+        };
+        return [...prev, newSystemMessage];
+      });
+      
+      // Switch to analysis tab to show results
+      setActiveTab('analysis');
+    } catch (error) {
+      console.error('Error running manual analysis:', error);
+      setAnalysisError(error instanceof Error ? error.message : 'Unknown error occurred');
+      
+      // Add error message to chat
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+      setMessages(prev => {
+        const newSystemMessage = {
+          id: `msg-${Date.now()}`,
+          role: 'system',
+          content: `Error performing analysis: ${errorMsg}`,
+          timestamp: new Date().toISOString(),
+          metadata: {
+            referencedDocuments: [documentId],
+            referencedAnalyses: [],
+          }
+        };
+        return [...prev, newSystemMessage];
+      });
+    } finally {
+      setAnalysisLoading(false);
+    }
   };
 
   return (
@@ -219,6 +419,7 @@ export default function Workspace() {
                   <div className="h-full">
                     <PDFViewer 
                       document={selectedDocument}
+                      highlightId={highlightId}
                       onCitationCreate={(citation) => {
                         console.log('Citation created:', citation);
                         // You can add citation handling logic here
@@ -251,27 +452,30 @@ export default function Workspace() {
                   </div>
                 )}
               </TabsContent>
-              <TabsContent value="analysis" className="h-[calc(100vh-13rem)] p-0">
-                <div className="h-full flex items-center justify-center">
-                  <div className="text-center p-6 max-w-md">
-                    <div className="bg-indigo-100 p-3 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4">
-                      <BarChart2 className="h-8 w-8 text-indigo-600" />
-                    </div>
-                    <h3 className="text-lg font-semibold text-indigo-700 mb-2">No data to display</h3>
-                    <p className="text-gray-600 mb-6">
-                      Upload a financial document and ask questions in the chat to see interactive visualizations here.
-                    </p>
-                    {!selectedDocument && (
-                      <button
-                        onClick={() => setShowUploadForm(true)}
-                        className="inline-flex items-center bg-indigo-600 text-white px-6 py-3 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors shadow-sm"
-                      >
-                        <Upload className="h-5 w-5 mr-2" />
-                        Upload Document
-                        <ChevronRight className="h-4 w-4 ml-1" />
-                      </button>
-                    )}
+              <TabsContent value="analysis" className="h-[calc(100vh-13rem)] p-0 flex flex-col">
+                {selectedDocument && (
+                  <div className="p-4 border-b">
+                    <AnalysisControls 
+                      isLoading={analysisLoading}
+                      onRunAnalysis={(analysisType, knowledgeBase, userQuery) => {
+                        runManualAnalysis(
+                          selectedDocument.metadata.id,
+                          analysisType,
+                          knowledgeBase,
+                          userQuery
+                        );
+                      }}
+                    />
                   </div>
+                )}
+                <div className="flex-1 overflow-hidden">
+                  <Canvas 
+                    analysisResults={analysisResults}
+                    error={analysisError || undefined}
+                    loading={analysisLoading}
+                    onCitationClick={handleCitationClick}
+                    messages={messages}
+                  />
                 </div>
               </TabsContent>
             </Tabs>

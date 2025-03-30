@@ -24,6 +24,7 @@ class Message(BaseModel):
     citation_links: List[str] = Field(default_factory=list)
     citations: Optional[List[Citation]] = Field(default_factory=list)
     content_blocks: Optional[List[ContentBlock]] = None
+    analysis_blocks: Optional[List[Dict[str, Any]]] = None
 
 
 class ConversationState(BaseModel):
@@ -64,6 +65,7 @@ class MessageResponse(BaseModel):
     citation_links: List[str] = Field(default_factory=list)
     citations: Optional[List[Citation]] = None
     content_blocks: Optional[List[ContentBlock]] = None
+    analysis_blocks: Optional[List[Dict[str, Any]]] = None
 
 
 class ConversationHistoryResponse(BaseModel):

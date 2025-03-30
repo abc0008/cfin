@@ -31,9 +31,9 @@ interface PDFViewerProps {
   aiHighlights?: IHighlight[];
   onCitationsLoaded?: (citations: IHighlight[]) => void;
   pdfUrl?: string;
-  highlightId?: string; // ID of a highlight to scroll to
-  renderingQuality?: 'low' | 'medium' | 'high'; // Control rendering quality for performance
-  pageBufferSize?: number; // Number of pages to keep in memory
+  highlightId?: string | null;
+  renderingQuality?: 'low' | 'medium' | 'high';
+  pageBufferSize?: number;
 }
 
 export function PDFViewer({ 
@@ -263,10 +263,14 @@ export function PDFViewer({
   
   // Scroll to highlight when highlightId changes
   useEffect(() => {
-    if (!isBrowser || !highlightId) return;
-    
-    scrollToHighlight(highlightId);
-  }, [highlightId, isBrowser, scrollToHighlight]);
+    if (highlightId && allHighlights.length > 0) {
+      const highlight = allHighlights.find(h => h.id === highlightId);
+      if (highlight) {
+        // Scroll to the highlight
+        scrollToHighlight(highlightId);
+      }
+    }
+  }, [highlightId, allHighlights, scrollToHighlight]);
   
   // Update render scale when renderingQuality changes
   useEffect(() => {

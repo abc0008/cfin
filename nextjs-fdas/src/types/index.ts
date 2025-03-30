@@ -72,6 +72,14 @@ export interface Message {
   referencedAnalyses: string[];
   citationLinks?: string[];
   citations?: Array<Citation>;
+  content_blocks?: any[];
+  analysis_blocks?: Array<{
+    id: string;
+    block_type: string;
+    title: string;
+    content: any;
+    created_at: string;
+  }>;
 }
 
 export interface ConversationState {
@@ -88,10 +96,33 @@ export interface AnalysisResult {
   documentIds: string[];
   analysisType: string;
   timestamp: string;
-  metrics: FinancialMetric[];
-  ratios: FinancialRatio[];
-  insights: string[];
-  visualizationData: Record<string, any>;
+  analysisText?: string;
+  visualizationData?: {
+    charts: any[];
+    tables: any[];
+    monetaryValues?: any;
+    percentages?: any;
+    keywordFrequency?: any;
+  };
+  data: {
+    metrics: FinancialMetric[];
+    charts?: ChartData[];
+    tables?: TableData[];
+  };
+  citationReferences?: Record<string, string>;
+  query?: string;
+}
+
+export interface ClaudeCitation {
+  type: string;
+  cited_text: string;
+  document_title: string;
+  start_page_number?: number;
+  end_page_number?: number;
+  start_char_index?: number;
+  end_char_index?: number;
+  start_block_index?: number;
+  end_block_index?: number;
 }
 
 export interface ConversationMetadata {

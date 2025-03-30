@@ -3,8 +3,12 @@
 import React, { useState } from 'react';
 import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { Citation, Message } from '@/types';
-import { EnhancedChart, ChartType } from '@/components/visualization/EnhancedChart';
+import { EnhancedChart } from '@/components/visualization/EnhancedChart';
 import { FinancialInsight, TrendAnalysis } from '@/types/enhanced';
+import { Card } from '@/components/ui/card';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { BarChart2 } from 'lucide-react';
+import { ChartType } from '@/types/visualization';
 
 export default function TestMarkdownPage() {
   const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null);

@@ -81,26 +81,27 @@ export const MessageSchema = z.object({
   referencedDocuments: z.array(z.string()).optional().default([]),
   referencedAnalyses: z.array(z.string()).optional().default([]),
   citations: z.array(CitationSchema).optional().default([]),
-  contentBlocks: z.any().optional()
+  contentBlocks: z.any().optional(),
+  analysis_blocks: z.array(z.any()).optional()
 });
 
 // Message Request Schema - Used when sending messages to the API
 export const MessageRequestSchema = z.object({
-  session_id: z.string(),
+  sessionId: z.string(),
   content: z.string(),
-  user_id: z.string().default('default-user'),
-  document_ids: z.array(z.string()).optional().default([]),
-  referenced_documents: z.array(z.string()).optional().default([]),
-  referenced_analyses: z.array(z.string()).optional().default([]),
-  citation_links: z.array(z.string()).optional().default([]),
-  citation_ids: z.array(z.string()).optional().default([])
+  userId: z.string().default('default-user').optional(),
+  documentIds: z.array(z.string()).optional().default([]),
+  referencedDocuments: z.array(z.string()).optional().default([]),
+  referencedAnalyses: z.array(z.string()).optional().default([]),
+  citationLinks: z.array(z.string()).optional().default([]),
+  citationIds: z.array(z.string()).optional().default([])
 });
 
 // Conversation Create Request Schema - Used when creating new conversations
 export const ConversationCreateRequestSchema = z.object({
   title: z.string(),
-  user_id: z.string().default('default-user'),
-  document_ids: z.array(z.string()).optional().default([]),
+  userId: z.string().default('default-user').optional(),
+  documentIds: z.array(z.string()).optional().default([]),
   metadata: z.record(z.any()).optional()
 });
 
@@ -151,10 +152,36 @@ export const AnalysisBlockSchema = z.object({
 });
 
 export const AnalysisResultSchema = z.object({
-  id: z.string().uuid(),
-  documentIds: z.array(z.string().uuid()),
+  id: z.string().refine(
+    (val) => {
+      // Accept both direct UUIDs and prefixed IDs (analysis-uuid, local-uuid)
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const prefixedPattern = /^(analysis-|local-)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      return uuidPattern.test(val) || prefixedPattern.test(val);
+    },
+    { message: "ID must be a valid UUID or a prefixed UUID (analysis-uuid, local-uuid)" }
+  ),
+  documentIds: z.array(z.string().refine(
+    (val) => {
+      // Accept both direct UUIDs and prefixed IDs (document-, local-)
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const prefixedPattern = /^(document-|local-)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      return uuidPattern.test(val) || prefixedPattern.test(val);
+    },
+    { message: "Document ID must be a valid UUID or a prefixed UUID" }
+  )),
   analysisType: z.string(),
-  timestamp: z.string().datetime(),
+  timestamp: z.string().refine(
+    (val) => {
+      // Accept ISO datetime strings with flexible formats
+      try {
+        return !isNaN(new Date(val).getTime());
+      } catch (e) {
+        return false;
+      }
+    },
+    { message: "Timestamp must be a valid date string" }
+  ),
   metrics: z.array(FinancialMetricSchema),
   ratios: z.array(FinancialRatioSchema),
   insights: z.array(z.string()),
@@ -179,7 +206,17 @@ export const EnhancedAnalysisResultSchema = AnalysisResultSchema.extend({
 export const ConversationAnalysisResponseSchema = z.object({
   id: z.string(),
   conversationId: z.string(),
-  timestamp: z.string().datetime(),
+  timestamp: z.string().refine(
+    (val) => {
+      // Accept ISO datetime strings with flexible formats
+      try {
+        return !isNaN(new Date(val).getTime());
+      } catch (e) {
+        return false;
+      }
+    },
+    { message: "Timestamp must be a valid date string" }
+  ),
   summary: z.string(),
   keyInsights: z.array(z.string()),
   visualizationBlocks: z.array(

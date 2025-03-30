@@ -3,6 +3,12 @@ const nextConfig = {
   images: {
     domains: ['localhost'],
   },
+  // Explicitly enable SWC
+  swcMinify: true,
+  experimental: {
+    // Force SWC transform
+    forceSwcTransforms: true,
+  },
   webpack: (config) => {
     // Support loading PDF files
     config.module.rules.push({

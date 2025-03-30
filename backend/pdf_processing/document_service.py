@@ -323,6 +323,19 @@ class DocumentService:
             "citations": [citation.model_dump() for citation in citation_schemas],
             "confidence_score": document.confidence_score or 0.0
         }
+        
+    async def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a document by ID. This is an alias for get_document_content for backwards compatibility.
+        
+        Args:
+            document_id: ID of the document
+            
+        Returns:
+            Dictionary containing document content if found, None otherwise
+        """
+        # This method should match what's being expected by the calling code
+        return await self.get_document_content(document_id)
 
     async def extract_structured_financial_data(self, document_id: str, text: str = None) -> Dict[str, Any]:
         """

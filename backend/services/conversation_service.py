@@ -360,20 +360,15 @@ class ConversationService:
         citation_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
-        Process a user message and generate a response with the AI.
-        This involves adding the user message to the conversation history,
-        retrieving the conversation context, generating a response,
-        and adding the AI's response to the conversation history.
-        
-        Supports document citations through Claude's citation feature.
+        Process a user message and generate an AI response.
         
         Args:
             conversation_id: ID of the conversation
-            content: The user's message content
-            citation_ids: Optional list of citation IDs to include
+            content: Message content
+            citation_ids: Optional list of citation IDs to include as context
             
         Returns:
-            Dictionary with response details
+            Dict containing success status and the assistant message
         """
         # Get conversation and validate it exists
         conversation = await self.conversation_repository.get_conversation(conversation_id)
@@ -523,6 +518,81 @@ class ConversationService:
                 "message": assistant_message
             }
             
+        elif approach == "visualization_analysis":
+            # Use specialized visualization tools flow
+            logger.info(f"Using visualization tools approach for conversation {conversation_id}")
+            
+            # Combine document texts into a single string for analysis
+            combined_doc_text = ""
+            for doc in document_texts:
+                if "raw_text" in doc:
+                    combined_doc_text += f"\n\n{doc['raw_text']}"
+            
+            logger.info(f"Calling Claude with visualization tools for query: '{content[:50]}...'")
+            
+            # Call Claude with visualization tools
+            result = await self.claude_service.analyze_with_visualization_tools(
+                document_text=combined_doc_text,
+                user_query=content
+            )
+            
+            # Extract analysis text and visualization data
+            analysis_text = result.get("analysis_text", "")
+            visualizations = result.get("visualizations", {"charts": [], "tables": []})
+            
+            logger.info(f"Received visualization data: {len(visualizations.get('charts', []))} charts, {len(visualizations.get('tables', []))} tables")
+            
+            # Add assistant message to conversation
+            assistant_message = await self.add_message(
+                conversation_id=conversation_id,
+                content=analysis_text,
+                role="assistant"
+            )
+            
+            if not assistant_message:
+                raise ValueError("Failed to add assistant message to conversation")
+            
+            # Process visualizations and store as analysis blocks
+            charts = visualizations.get("charts", [])
+            tables = visualizations.get("tables", [])
+            
+            visualization_list = []
+            
+            # Process charts - store the chart data directly without modification
+            # since it's already been processed by _process_chart_input
+            for chart in charts:
+                chart_data = {
+                    "title": chart.get("config", {}).get("title", "Chart"),
+                    "visualization_type": chart.get("chartType", "chart"),
+                    "chart_data": chart  # Store the entire processed chart data
+                }
+                visualization_list.append(chart_data)
+            
+            # Process tables - store the table data directly without modification
+            # since it's already been processed by _process_table_input
+            for table in tables:
+                table_data = {
+                    "title": table.get("config", {}).get("title", "Table"),
+                    "visualization_type": "table",
+                    "table_data": table  # Store the entire processed table data
+                }
+                visualization_list.append(table_data)
+            
+            # Store visualizations as analysis blocks
+            if visualization_list:
+                logger.info(f"Storing {len(visualization_list)} visualization blocks for message {assistant_message.id}")
+                await self._process_visualizations(
+                    message_id=assistant_message.id,
+                    visualizations=visualization_list
+                )
+            else:
+                logger.warning(f"No visualization data to store for message {assistant_message.id}")
+            
+            return {
+                "success": True,
+                "message": assistant_message
+            }
+        
         elif approach == "citations":
             # Use citation-aware processing with LangGraph
             logger.info(f"Using citation-based approach for conversation {conversation_id}")
@@ -844,7 +914,7 @@ When analyzing financial documents, focus on:
             conversation_history: Previous conversation history
             
         Returns:
-            The most appropriate processing approach: "simple_qa", "citations", "full_graph"
+            The most appropriate processing approach: "simple_qa", "citations", "full_graph", "visualization_analysis"
         """
         # If no documents, use simple response
         if not document_texts or len(document_texts) == 0:
@@ -856,8 +926,13 @@ When analyzing financial documents, focus on:
             logger.info(f"User message for conversation {conversation_id} mentions citations, using citations approach")
             return "citations"
         
+        # If message requires visualization (chart or table)
+        if any(term in message_content.lower() for term in ["visualize", "chart", "graph", "plot", "table", "show me", "display"]):
+            logger.info(f"User message for conversation {conversation_id} requests visualization, using visualization_analysis approach")
+            return "visualization_analysis"
+        
         # If message requires financial analysis
-        if any(term in message_content.lower() for term in ["analyze", "analysis", "calculate", "ratio", "trend", "chart", "compare"]):
+        if any(term in message_content.lower() for term in ["analyze", "analysis", "calculate", "ratio", "trend", "compare"]):
             logger.info(f"User message for conversation {conversation_id} requests financial analysis, using full_graph approach")
             return "full_graph"
         

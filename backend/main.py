@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 from dotenv import load_dotenv
 
-from api.router import api_router
+from cfin.backend.app.routes import document, conversation, analysis
 from pdf_processing.langgraph_service import LangGraphService
 
 # Load environment variables
@@ -50,8 +50,10 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Error initializing services: {e}")
 
-# Include API router
-app.include_router(api_router, prefix="/api")
+# Include API routers
+app.include_router(document.router, prefix="/api")
+app.include_router(conversation.router, prefix="/api")
+app.include_router(analysis.router, prefix="/api")
 
 # Health check endpoint
 @app.get("/health")

@@ -33,6 +33,19 @@
     --ring: 221.2 83.2% 53.3%;
  
     --radius: 0.5rem;
+
+    /* Chart colors - needed for visualizations */
+    --chart-1: 221.2 83.2% 53.3%;
+    --chart-2: 15 100% 55%;
+    --chart-3: 162 76.1% 46.5%;
+    --chart-4: 291.1 91.1% 64.1%;
+    --chart-5: 52.5 100% 50%;
+    --chart-6: 245 58% 51%;
+    --chart-7: 329.8 100% 56.3%;
+    --chart-8: 194.7 100% 42.7%;
+    --chart-up: 142.1 76.2% 36.3%;
+    --chart-down: 0 84.2% 60.2%;
+    --chart-neutral: 215.4 16.3% 46.9%;
   }
  
   .dark {
@@ -63,6 +76,19 @@
     --border: 217.2 32.6% 17.5%;
     --input: 217.2 32.6% 17.5%;
     --ring: 224.3 76.3% 48%;
+
+    /* Chart colors - dark mode versions */
+    --chart-1: 217.2 91.2% 59.8%;
+    --chart-2: 20 90% 60%;
+    --chart-3: 162 86% 55%;
+    --chart-4: 291.1 96% 68%;
+    --chart-5: 52.5 95% 58%;
+    --chart-6: 245 70% 60%;
+    --chart-7: 329.8 95% 62%;
+    --chart-8: 194.7 95% 55%;
+    --chart-up: 142.1 76.2% 45%;
+    --chart-down: 0 84.2% 65%;
+    --chart-neutral: 215 20.2% 65.1%;
   }
 }
  
@@ -73,6 +99,72 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* Chart component styles */
+.chart-container {
+  @apply w-full h-full mb-4 rounded-lg overflow-hidden p-2;
+}
+
+.chart-header {
+  @apply mb-3;
+}
+
+.chart-title {
+  @apply text-lg font-semibold;
+}
+
+.chart-description {
+  @apply text-sm text-gray-500;
+}
+
+.chart-footer {
+  @apply mt-2 text-xs text-gray-500 italic;
+}
+
+.recharts-responsive-container {
+  @apply rounded-lg overflow-hidden;
+}
+
+.recharts-tooltip-wrapper {
+  @apply !shadow-lg;
+}
+
+.recharts-default-tooltip {
+  @apply !bg-white dark:!bg-gray-800 !border-gray-200 dark:!border-gray-600 !shadow-md !p-2;
+}
+
+/* Table component styles */
+.data-table-container {
+  @apply w-full overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700;
+}
+
+.data-table {
+  @apply w-full;
+}
+
+.data-table-header {
+  @apply bg-gray-100 dark:bg-gray-800 text-left;
+}
+
+.data-table-header th {
+  @apply px-4 py-2 font-medium text-gray-600 dark:text-gray-300;
+}
+
+.data-table-row {
+  @apply border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700;
+}
+
+.data-table-row:last-child {
+  @apply border-b-0;
+}
+
+.data-table-cell {
+  @apply px-4 py-2;
+}
+
+.data-table-footer {
+  @apply text-xs text-gray-500 mt-2 italic;
 }
 
 /* PDF viewer styles */

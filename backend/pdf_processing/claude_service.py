@@ -4,13 +4,14 @@ import asyncio
 import json
 import re
 import uuid
-from typing import Dict, List, Optional, Any, Tuple, Union
+from typing import Dict, List, Optional, Any, Tuple, Union, TYPE_CHECKING, ForwardRef
 import logging
 from anthropic import AsyncAnthropic
-from anthropic.types import Message as AnthropicMessage
+from anthropic.types import Message as AnthropicMessage, ToolUseBlock
 import string
 from datetime import datetime
 import contextlib
+import httpx
 
 from models.document import ProcessedDocument, Citation as DocumentCitation, DocumentContentType, DocumentMetadata, ProcessingStatus
 from models.citation import Citation, CitationType, CharLocationCitation, PageLocationCitation, ContentBlockLocationCitation
@@ -18,6 +19,36 @@ from pdf_processing.langchain_service import LangChainService
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+# Create a ToolSchema type reference for type checking
+if TYPE_CHECKING:
+    from models.tools import ToolSchema
+else:
+    ToolSchema = ForwardRef('ToolSchema')
+
+# Import tool models
+try:
+    from models.tools import ToolSchema, ALL_TOOLS, ALL_TOOLS_DICT
+    TOOLS_SUPPORT = True
+except ImportError as e:
+    TOOLS_SUPPORT = False
+    logger.warning(f"Tools import failed: {e}. Tools features will be disabled.")
+except Exception as e:
+    TOOLS_SUPPORT = False
+    logger.warning(f"Tools unexpected error: {e}. Tools features will be disabled.")
+
+# Refined System Prompt for Tool Usage
+FINANCIAL_ANALYSIS_SYSTEM_PROMPT = """You are an expert financial analyst. Your primary task is to analyze the provided financial document(s) and respond to the user's query.
+
+CRITICAL INSTRUCTION: Whenever you need to present data in a chart, graph, or table format, you MUST use the provided tools ('generate_graph_data' for charts, 'generate_table_data' for tables). Do NOT describe chart data or table data in plain text. Use the tools to generate the structured JSON required for visualization based on their input schemas.
+
+Analysis Steps:
+1. Understand the user's query in the context of the provided document(s).
+2. Extract relevant financial figures, metrics, trends, and tables from the document(s).
+3. If the query requires a chart or graph visualization, use the 'generate_graph_data' tool. Ensure the chartType, config, data, and chartConfig match the tool's input schema precisely.
+4. If the query requires presenting detailed data in a table, use the 'generate_table_data' tool. Ensure the tableType, config, columns, and data match the tool's input schema precisely.
+5. Provide a concise textual analysis summarizing key findings and directly answering the user's query, referencing the generated visualizations/tables where appropriate (e.g., "As shown in the Revenue Trend chart...").
+"""
 
 @contextlib.asynccontextmanager
 async def get_anthropic_client():
@@ -1355,3 +1386,991 @@ Follow these guidelines:
         except Exception as e:
             logger.exception(f"Error in structured financial data extraction: {e}")
             return {"error": f"Extraction failed: {str(e)}"}
+
+    async def analyze_financial_document(
+        self, 
+        document_text: str,
+        template: str
+    ) -> Dict[str, Any]:
+        """
+        Analyze a financial document using Claude with a provided text template.
+        This method is used when we have the document in text form.
+        
+        Args:
+            document_text: Text content of the document
+            template: Template to use for the analysis prompt
+            
+        Returns:
+            Dictionary containing the analysis results
+        """
+        if not self.client:
+            logger.error("Cannot analyze document because Claude API client is not available")
+            raise ValueError("Claude API client is not available. Check your API key.")
+        
+        try:
+            # Prepare the prompt using the template
+            prompt_text = template.format(document_text="")
+            
+            logger.info(f"Analyzing financial document with Claude API, text length: {len(document_text)}")
+            
+            # Call Claude API
+            response = await self.client.messages.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Please analyze this financial document according to the instructions that follow."
+                            },
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "text",
+                                    "media_type": "text/plain",
+                                    "data": document_text
+                                },
+                                "title": "Financial Document",
+                                "citations": {"enabled": True}
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt_text
+                            }
+                        ]
+                    }
+                ],
+                temperature=0.2,  # Lower temperature for more focused analysis
+                max_tokens=4000
+            )
+            
+            # Extract the response text and citation data
+            if response:
+                logger.info(f"Received response from Claude API with {len(response.content)} content blocks")
+                
+                # Process content blocks to extract citations
+                result = {
+                    "content": "",
+                    "timestamp": datetime.now().isoformat(),
+                    "citations": []
+                }
+                
+                for content_block in response.content:
+                    if content_block.type == "text":
+                        result["content"] += content_block.text
+                        
+                        # Extract citations if present in this block
+                        if hasattr(content_block, 'citations') and content_block.citations:
+                            for citation in content_block.citations:
+                                citation_data = {
+                                    "type": citation.type,
+                                    "cited_text": citation.cited_text,
+                                    "document_title": citation.document_title
+                                }
+                                
+                                # Add location information based on citation type
+                                if citation.type == "char_location":
+                                    citation_data["start_char_index"] = citation.start_char_index
+                                    citation_data["end_char_index"] = citation.end_char_index
+                                
+                                result["citations"].append(citation_data)
+                
+                logger.info(f"Extracted {len(result['citations'])} citations from response")
+                return result
+            else:
+                logger.warning("Received empty response from Claude API")
+                return {
+                    "content": "No analysis could be generated for this document.",
+                    "timestamp": datetime.now().isoformat(),
+                    "citations": []
+                }
+                
+        except Exception as e:
+            logger.error(f"Error analyzing financial document with Claude API: {str(e)}", exc_info=True)
+            raise
+
+    async def analyze_financial_document_with_binary(
+        self, 
+        file_binary: bytes,
+        template: str
+    ) -> Dict[str, Any]:
+        """
+        Analyze a financial document using Claude with a provided file binary.
+        This method is used when we have the document as a binary file (PDF).
+        
+        Args:
+            file_binary: Binary content of the document file
+            template: Template to use for the analysis prompt
+            
+        Returns:
+            Dictionary containing the analysis results
+        """
+        if not self.client:
+            logger.error("Cannot analyze document because Claude API client is not available")
+            raise ValueError("Claude API client is not available. Check your API key.")
+        
+        try:
+            # Encode the file as base64
+            file_base64 = base64.b64encode(file_binary).decode('utf-8')
+            
+            logger.info(f"Analyzing financial document with Claude API using binary file, size: {len(file_binary)} bytes")
+            
+            # Call Claude API with the binary file
+            response = await self.client.messages.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Please analyze this financial document according to the instructions that follow."
+                            },
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": file_base64
+                                },
+                                "title": "Financial Document",
+                                "citations": {"enabled": True}
+                            },
+                            {
+                                "type": "text",
+                                "text": template
+                            }
+                        ]
+                    }
+                ],
+                temperature=0.2,  # Lower temperature for more focused analysis
+                max_tokens=4000
+            )
+            
+            # Extract the response text and citation data
+            if response:
+                logger.info(f"Received response from Claude API with {len(response.content)} content blocks")
+                
+                # Process content blocks to extract citations
+                result = {
+                    "content": "",
+                    "timestamp": datetime.now().isoformat(),
+                    "citations": []
+                }
+                
+                for content_block in response.content:
+                    if content_block.type == "text":
+                        result["content"] += content_block.text
+                        
+                        # Extract citations if present in this block
+                        if hasattr(content_block, 'citations') and content_block.citations:
+                            for citation in content_block.citations:
+                                citation_data = {
+                                    "type": citation.type,
+                                    "cited_text": citation.cited_text,
+                                    "document_title": citation.document_title
+                                }
+                                
+                                # Add page numbers for PDF citations
+                                if citation.type == "page_location":
+                                    citation_data["start_page_number"] = citation.start_page_number
+                                    citation_data["end_page_number"] = citation.end_page_number
+                                
+                                result["citations"].append(citation_data)
+                
+                logger.info(f"Extracted {len(result['citations'])} citations from response")
+                return result
+            else:
+                logger.warning("Received empty response from Claude API")
+                return {
+                    "content": "No analysis could be generated for this document.",
+                    "timestamp": datetime.now().isoformat(),
+                    "citations": []
+                }
+                
+        except Exception as e:
+            logger.error(f"Error analyzing financial document with Claude API: {str(e)}", exc_info=True)
+            raise
+
+    async def generate_response_with_tools(
+        self,
+        system_prompt: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[ToolSchema]] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4000
+    ) -> Dict[str, Any]:
+        """
+        Generate a response from Claude with tool support.
+        
+        Args:
+            system_prompt: System prompt that guides Claude's behavior
+            messages: List of message dictionaries with 'role' and 'content' keys
+            tools: Optional list of tools to make available to Claude
+            temperature: Temperature for generation (0.0 to 1.0)
+            max_tokens: Maximum number of tokens to generate
+            
+        Returns:
+            Dictionary containing the response with tool usage
+        """
+        if not self.client:
+            logger.warning("Using mock response because Claude API client is not available")
+            return {
+                "content": "I'm sorry, I cannot process your request because the Claude API is not configured properly. Please check the API key and try again.",
+                "tool_use": None
+            }
+        
+        try:
+            # Check if tools support is available
+            if not TOOLS_SUPPORT:
+                logger.warning("Tools support is not available, falling back to regular response")
+                return await self.generate_response(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+            
+            # Use ALL_TOOLS if none provided
+            if tools is None:
+                tools = ALL_TOOLS
+            
+            # Convert message format to Anthropic's format
+            formatted_messages = []
+            for msg in messages:
+                role = "user" if msg["role"] == "user" else "assistant"
+                
+                # Handle both string and list content formats
+                if isinstance(msg["content"], str):
+                    content = [{"type": "text", "text": msg["content"]}]
+                elif isinstance(msg["content"], list):
+                    content = msg["content"]
+                else:
+                    content = [{"type": "text", "text": str(msg["content"])}]
+                
+                formatted_messages.append({"role": role, "content": content})
+            
+            logger.info(f"Sending request to Claude API with {len(formatted_messages)} messages and {len(tools)} tools")
+            
+            # Format tools for the API
+            tool_schemas = []
+            for tool in tools:
+                tool_schemas.append({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema
+                })
+            
+            # Call Claude API with tools
+            response = await self.client.messages.create(
+                model=self.model,
+                system=system_prompt,
+                messages=formatted_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tool_schemas,
+                tool_choice={"type": "any"}  # Allow the model to use any tool
+            )
+            
+            # Process the response
+            result = {
+                "content": "",
+                "content_blocks": [],
+                "tool_uses": []
+            }
+            
+            # Extract content and tool usages
+            if hasattr(response, 'content'):
+                for block in response.content:
+                    if block.type == "text":
+                        result["content"] += block.text
+                        result["content_blocks"].append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        result["tool_uses"].append({
+                            "type": "tool_use",
+                            "id": getattr(block, "id", "unknown"),
+                            "name": getattr(block, "name", "unknown"),
+                            "input": getattr(block, "input", {})
+                        })
+                        # Also add a placeholder in content blocks
+                        result["content_blocks"].append({
+                            "type": "tool_use",
+                            "id": getattr(block, "id", "unknown"),
+                            "name": getattr(block, "name", "unknown")
+                        })
+            
+            logger.info(f"Processed Claude API response with {len(result['tool_uses'])} tool uses")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error calling Claude API with tools: {str(e)}")
+            error_message = f"I apologize, but there was an error processing your request: {str(e)}"
+            return {
+                "content": error_message,
+                "content_blocks": [{"type": "text", "text": error_message}],
+                "tool_uses": []
+            }
+
+    async def extract_financial_data_with_tools(
+        self,
+        pdf_content: bytes,
+        filename: str = "document.pdf",
+        document_type: DocumentContentType = None
+    ) -> Dict[str, Any]:
+        """
+        Extract financial data from a PDF using tool-based approach.
+        
+        Args:
+            pdf_content: PDF file content as bytes
+            filename: Name of the PDF file
+            document_type: Type of document being processed
+            
+        Returns:
+            Dictionary containing the extracted data and visualizations
+        """
+        if not self.client:
+            logger.error("Cannot extract financial data because Claude API client is not available")
+            raise ValueError("Claude API client is not available. Check your API key.")
+        
+        # Check for tools support
+        if not TOOLS_SUPPORT:
+            logger.warning("Tools support is not available, falling back to regular extraction")
+            return await self._extract_financial_data_with_citations(
+                pdf_content=pdf_content,
+                filename=filename,
+                document_type=document_type
+            )
+        
+        try:
+            logger.info(f"Extracting financial data with tools from: {filename}")
+            
+            # Convert to base64
+            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+            
+            # Prepare document type for the prompt
+            doc_type_str = document_type.value if document_type else "financial document"
+            
+            # Financial analysis prompt with structured data extraction
+            system_prompt = """You are a highly specialized financial document analysis assistant. Extract structured financial data from the document and create visualizations.
+Follow these guidelines:
+1. Identify all financial tables and metrics
+2. Extract values with their correct time periods, labels, and units
+3. Present the data in a structured JSON format
+4. Use the generate_graph_data tool to create visualizations of key metrics
+5. Use the generate_table_data tool for detailed financial tables"""
+            
+            # Create messages with the PDF document
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_base64
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": f"Analyze this {doc_type_str} and extract all financial data. Create charts for key metrics and tables for detailed data. Return comprehensive structured data with visualizations."
+                        }
+                    ]
+                }
+            ]
+            
+            # Import tools
+            from models.tools import ChartGenerationTool, TableGenerationTool
+            
+            # Call Claude API with tools
+            response = await self.generate_response_with_tools(
+                system_prompt=system_prompt,
+                messages=messages,
+                tools=[ChartGenerationTool(), TableGenerationTool()],
+                max_tokens=4000
+            )
+            
+            # Extract text content and tool usages
+            content_text = response.get("content", "")
+            tool_uses = response.get("tool_uses", [])
+            
+            # Process visualization data from tool uses
+            visualization_data = {
+                "charts": [],
+                "tables": []
+            }
+            
+            for tool_use in tool_uses:
+                tool_name = tool_use.get("name", "")
+                tool_input = tool_use.get("input", {})
+                
+                if tool_name == "generate_graph_data":
+                    visualization_data["charts"].append(tool_input)
+                    
+                    # Also add to visualization_data in the format expected by frontend
+                    chart_type = tool_input.get("chartType", "")
+                    if chart_type in ["bar", "multiBar", "line", "pie", "area", "stackedArea"]:
+                        # Create a key based on chart type
+                        key = f"{chart_type}Chart"
+                        visualization_data[key] = tool_input
+                    
+                    # Add to specific chart type collections for compatibility with existing code
+                    if chart_type == "bar" and "monetaryValues" not in visualization_data:
+                        # This is likely a monetary values chart
+                        visualization_data["monetaryValues"] = tool_input
+                    elif chart_type == "bar" and "percentages" not in visualization_data:
+                        # This could be a percentages chart
+                        visualization_data["percentages"] = tool_input
+                    elif chart_type == "bar" and "keywordFrequency" not in visualization_data:
+                        # This could be a keyword frequency chart
+                        visualization_data["keywordFrequency"] = tool_input
+                
+                elif tool_name == "generate_table_data":
+                    visualization_data["tables"].append(tool_input)
+                    
+                    # Also add to visualization_data in the format expected by frontend
+                    table_type = tool_input.get("tableType", "")
+                    key = f"{table_type}Table"
+                    visualization_data[key] = tool_input
+            
+            # Extract financial metrics and data from the text
+            extracted_data = {}
+            try:
+                # Check for JSON format in the response
+                json_match = re.search(r'```json\s*([\s\S]*?)\s*```|{[\s\S]*}', content_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1) if json_match.group(1) else json_match.group(0)
+                    # Clean up the JSON string if needed
+                    json_str = re.sub(r'^```json\s*|\s*```$', '', json_str)
+                    json_data = json.loads(json_str)
+                    extracted_data = json_data
+                else:
+                    logger.warning("Could not find JSON data in Claude's response")
+                    extracted_data = {"raw_text": content_text}
+            except Exception as e:
+                logger.error(f"Error parsing extracted data JSON: {str(e)}")
+                extracted_data = {"raw_text": content_text, "error": str(e)}
+            
+            # Add visualization data to the result
+            extracted_data["visualization_data"] = visualization_data
+            extracted_data["visualizationData"] = visualization_data  # camelCase version
+            
+            return extracted_data
+            
+        except Exception as e:
+            logger.error(f"Error extracting financial data with tools: {str(e)}")
+            return {"error": str(e), "visualization_data": {}, "visualizationData": {}}
+
+    async def analyze_financial_document_with_tools(
+        self,
+        document_text: str,
+        user_query: str,
+        knowledge_base: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Analyze financial document using tool-based approach.
+        
+        Args:
+            document_text: Text content of the financial document
+            user_query: User's analysis query
+            knowledge_base: Optional knowledge base content
+            
+        Returns:
+            Dictionary containing analysis results and visualizations
+        """
+        if not self.client:
+            logger.error("Cannot analyze financial document because Claude API client is not available")
+            raise ValueError("Claude API client is not available. Check your API key.")
+        
+        # Check for tools support
+        if not TOOLS_SUPPORT:
+            logger.warning("Tools support is not available, falling back to regular analysis")
+            # Return a simple text-based analysis without visualizations
+            return {
+                "analysis_text": "Tools support is not available. Please ensure the tools models are properly imported.",
+                "visualizations": {"charts": [], "tables": []}
+            }
+        
+        try:
+            logger.info(f"Analyzing financial document with tools (document length: {len(document_text)} chars)")
+            
+            # Create system prompt for financial analysis
+            system_prompt = """You are an expert financial analyst specializing in regional banks. Your task is to analyze 
+            financial documents and answer user queries by generating structured data for visualizations and metrics.
+            
+            Follow these guidelines:
+            1. Extract key financial data, metrics, and ratios relevant to the query
+            2. Generate individual financial metrics using the generate_financial_metric tool
+            3. Create period-over-period comparisons using the generate_comparative_period tool 
+            4. Generate appropriate visualizations using the chart and table tools
+            5. Each visualization should illustrate an important insight or finding
+            6. Focus on metrics relevant to regional banks (NIM, efficiency ratio, loan growth, etc.)
+            7. Include period-over-period comparisons where applicable
+            8. Support recommendations with data from the financial documents
+            
+            Use tools for ALL data outputs - metrics, comparisons, and visualizations. Do not describe charts or metrics in text only."""
+            
+            # Format user message with document, knowledge base, and query
+            user_message = f"""
+            <financial_documents>
+            {document_text}
+            </financial_documents>
+            
+            <knowledge_base>
+            {knowledge_base}
+            </knowledge_base>
+            
+            <user_query>
+            {user_query}
+            </user_query>
+            
+            Analyze this financial document to answer the user's query. Generate individual financial metrics, period-over-period 
+            comparisons, and appropriate charts and tables using the tools provided. For each visualization and metric, include 
+            key insights about what the data shows.
+            """
+            
+            # Prepare messages
+            messages = [
+                {
+                    "role": "user",
+                    "content": user_message
+                }
+            ]
+            
+            # Import tool schemas
+            from models.tools import ChartGenerationTool, TableGenerationTool, FinancialMetricGenerationTool, ComparativePeriodGenerationTool
+            
+            # Call Claude API with tools
+            result = await self.generate_response_with_tools(
+                system_prompt=system_prompt,
+                messages=messages,
+                tools=[ChartGenerationTool(), TableGenerationTool(), FinancialMetricGenerationTool(), ComparativePeriodGenerationTool()],
+                temperature=0.3,  # Lower temperature for more consistent outputs
+                max_tokens=4000
+            )
+            
+            # Format visualization data from tool outputs
+            visualizations = {
+                "charts": [],
+                "tables": []
+            }
+            
+            # Initialize lists for metrics and comparative periods
+            metrics = []
+            comparative_periods = []
+            
+            # Process tool outputs
+            for tool_use in result.get("tool_uses", []):
+                if tool_use["name"] == "generate_graph_data":
+                    from models.visualization import ChartData
+                    try:
+                        chart_data = ChartData(**tool_use["input"])
+                        visualizations["charts"].append(chart_data)
+                        logger.info(f"Added chart: {chart_data.chartType} - {chart_data.config.title}")
+                    except Exception as e:
+                        logger.error(f"Error creating chart data: {str(e)}")
+                elif tool_use["name"] == "generate_table_data":
+                    from models.visualization import TableData
+                    try:
+                        table_data = TableData(**tool_use["input"])
+                        visualizations["tables"].append(table_data)
+                        logger.info(f"Added table: {table_data.tableType} - {table_data.config.title}")
+                    except Exception as e:
+                        logger.error(f"Error creating table data: {str(e)}")
+                elif tool_use["name"] == "generate_financial_metric":
+                    try:
+                        metric_data = tool_use["input"]
+                        metrics.append(metric_data)
+                        logger.info(f"Added financial metric: {metric_data.get('name')} - {metric_data.get('value')}")
+                    except Exception as e:
+                        logger.error(f"Error creating financial metric data: {str(e)}")
+                elif tool_use["name"] == "generate_comparative_period":
+                    try:
+                        period_data = tool_use["input"]
+                        comparative_periods.append(period_data)
+                        logger.info(f"Added comparative period: {period_data.get('metric')}")
+                    except Exception as e:
+                        logger.error(f"Error creating comparative period data: {str(e)}")
+            
+            logger.info(f"Generated {len(visualizations['charts'])} charts, {len(visualizations['tables'])} tables, "
+                        f"{len(metrics)} metrics, and {len(comparative_periods)} comparative periods")
+            
+            # Return analysis text, visualizations, metrics, and comparative periods
+            return {
+                "analysis_text": result.get("content", ""),
+                "visualizations": visualizations,
+                "metrics": metrics,
+                "comparative_periods": comparative_periods
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing financial document with tools: {str(e)}", exc_info=True)
+            # Return error information
+            return {
+                "analysis_text": f"Error analyzing document: {str(e)}",
+                "visualizations": {"charts": [], "tables": []},
+                "metrics": [],
+                "comparative_periods": []
+            }
+
+    # --- NEW METHOD for Tool-Based Analysis ---
+
+    async def analyze_with_visualization_tools(
+        self,
+        document_text: str,
+        user_query: str,
+        knowledge_base: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Analyze a financial document using Claude with tool support for visualizations.
+
+        Args:
+            document_text: Text content of the financial document.
+            user_query: The user's specific question or analysis request.
+            knowledge_base: Optional additional context or domain knowledge.
+
+        Returns:
+            A dictionary containing:
+            - "analysis_text": The textual analysis from Claude.
+            - "visualizations": A dict with "charts": [...] and "tables": [...]
+                                containing the structured JSON data generated by tools.
+        """
+        if not self.client:
+            logger.error("Cannot analyze document because Claude API client is not available.")
+            return {
+                "analysis_text": "Error: Claude API client not configured.",
+                "visualizations": {"charts": [], "tables": []}
+            }
+
+        try:
+            logger.info(f"Starting analysis with visualization tools for query: '{user_query[:50]}...'")
+
+            # Prepare the user message content, including the document text and knowledge base
+            user_content_parts = [
+                {"type": "text", "text": "Analyze the following financial document(s):"}
+            ]
+
+            # Add document text - using text type for simplicity here
+            # In a more robust implementation, we might pass the PDF directly if available
+            user_content_parts.append({
+                "type": "text",
+                "text": f"<financial_document>\n{document_text}\n</financial_document>"
+            })
+
+            if knowledge_base:
+                user_content_parts.append({
+                    "type": "text",
+                    "text": f"<knowledge_base>\n{knowledge_base}\n</knowledge_base>"
+                })
+
+            user_content_parts.append({
+                "type": "text",
+                "text": f"\nUser Query: {user_query}"
+            })
+
+            # Prepare messages list for Claude API
+            messages = [{"role": "user", "content": user_content_parts}]
+
+            # Log request details
+            logger.debug(f"Sending request to Claude with {len(messages)} message(s) and {len(ALL_TOOLS_DICT)} tools.")
+
+            # Call Claude API with tools
+            response = await self.client.messages.create(
+                model=self.model,
+                system=FINANCIAL_ANALYSIS_SYSTEM_PROMPT,  # Use the refined system prompt
+                messages=messages,
+                tools=ALL_TOOLS_DICT,
+                tool_choice={"type": "any"},
+                temperature=0.3, # Lower temp for more factual/structured output
+                max_tokens=4096  # Maximize token limit for complex responses
+            )
+
+            logger.info("Received response from Claude API.")
+            #logger.debug(f"Claude Raw Response: {response}") # Careful logging raw response
+
+            # Process the response to extract text and tool uses
+            processed_result = self._process_tool_calls(response)
+
+            logger.info(f"Analysis complete. Text length: {len(processed_result['analysis_text'])}. "
+                        f"Charts: {len(processed_result['visualizations']['charts'])}. "
+                        f"Tables: {len(processed_result['visualizations']['tables'])}.")
+
+            return processed_result
+
+        except Exception as e:
+            logger.exception(f"Error during analysis with visualization tools: {e}")
+            return {
+                "analysis_text": f"An error occurred during analysis: {e}",
+                "visualizations": {"charts": [], "tables": []}
+            }
+
+    def _process_tool_calls(self, response: AnthropicMessage) -> Dict[str, Any]:
+        """
+        Processes Claude's response, extracting text and structured data from tool calls.
+        The method transforms the raw tool_input into properly formatted chart and table data
+        that can be correctly rendered by the frontend components.
+
+        Args:
+            response: The AnthropicMessage object received from the API.
+
+        Returns:
+            A dictionary containing 'analysis_text' and 'visualizations' (with 'charts' and 'tables').
+        """
+        analysis_text = ""
+        charts = []
+        tables = []
+
+        if not response.content:
+            logger.warning("Claude response has no content.")
+            return {
+                "analysis_text": "No content received from analysis.",
+                "visualizations": {"charts": [], "tables": []}
+            }
+
+        for block in response.content:
+            if block.type == "text":
+                analysis_text += block.text + "\n"
+            elif block.type == "tool_use":
+                tool_name = block.name
+                tool_input = block.input
+
+                logger.info(f"Processing tool use: {tool_name}")
+                #logger.debug(f"Tool Input: {json.dumps(tool_input, indent=2)}") # Log tool input for debugging
+
+                processed_data = self._process_visualization_input(tool_name, tool_input, block.id)
+                if processed_data:
+                    if tool_name == "generate_graph_data":
+                        charts.append(processed_data)
+                        logger.info(f"Successfully processed chart data for tool ID {block.id}")
+                    elif tool_name == "generate_table_data":
+                        tables.append(processed_data)
+                        logger.info(f"Successfully processed table data for tool ID {block.id}")
+                else:
+                    logger.warning(f"Failed to process {tool_name} data for tool ID {block.id}")
+                    analysis_text += f"\n[Note: Failed to process visualization data for tool {block.id}]\n"
+            else:
+                logger.warning(f"Unsupported content block type: {block.type}")
+
+        return {
+            "analysis_text": analysis_text.strip(),
+            "visualizations": {
+                "charts": charts,
+                "tables": tables
+            }
+        }
+    
+    def _process_visualization_input(self, tool_name: str, tool_input: Dict[str, Any], block_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Process the raw input provided by Claude to the visualization tools and transform it
+        into the final renderable structure expected by the frontend.
+        
+        Args:
+            tool_name: The name of the tool being used
+            tool_input: The raw input provided to the tool
+            block_id: The ID of the tool_use block
+            
+        Returns:
+            Processed chart or table data, or None if processing failed
+        """
+        try:
+            if tool_name == "generate_graph_data":
+                return self._process_chart_input(tool_input)
+            elif tool_name == "generate_table_data":
+                return self._process_table_input(tool_input)
+            else:
+                logger.warning(f"Unsupported tool: {tool_name}")
+                return None
+        except Exception as e:
+            logger.error(f"Error processing {tool_name} input (ID: {block_id}): {e}")
+            return None
+    
+    def _process_chart_input(self, tool_input: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Process the raw chart input from the tool into a properly formatted chart data structure
+        that can be rendered by the frontend.
+        
+        Args:
+            tool_input: The raw input provided to the generate_graph_data tool
+            
+        Returns:
+            Processed chart data for frontend rendering
+        """
+        # Basic validation
+        if not isinstance(tool_input, dict):
+            logger.warning("Chart input is not a dictionary")
+            return None
+            
+        if not all(key in tool_input for key in ["chartType", "config", "data"]):
+            logger.warning("Chart input missing required keys")
+            return None
+            
+        # Create a copy to avoid modifying the original
+        processed_chart = tool_input.copy()
+        chart_type = processed_chart.get("chartType")
+        
+        # Define default chart colors for consistent visualization
+        CHART_COLORS = [
+            "#8884d8", "#82ca9d", "#ffc658", "#ff8042", "#0088fe", 
+            "#00c49f", "#ffbb28", "#ff8042", "#a4de6c", "#d0ed57"
+        ]
+        
+        # Process the chart based on its type
+        try:
+            if chart_type in ["line", "multiBar", "stackedArea"]:
+                # Ensure data structure is correct for multi-series charts
+                if not processed_chart.get("chartConfig"):
+                    processed_chart["chartConfig"] = {}
+                
+                # Set default colors if not provided
+                if "chartConfig" in processed_chart:
+                    for i, (key, metric_config) in enumerate(processed_chart["chartConfig"].items()):
+                        if not metric_config.get("color"):
+                            color_index = i % len(CHART_COLORS)
+                            metric_config["color"] = CHART_COLORS[color_index]
+                
+                # Ensure xAxisKey is set
+                if "config" in processed_chart and not processed_chart["config"].get("xAxisKey"):
+                    # Default to "name" or first key that looks like a category/period
+                    if processed_chart["data"] and len(processed_chart["data"]) > 0:
+                        possible_keys = ["name", "period", "category", "date", "month", "year", "quarter"]
+                        data_keys = list(processed_chart["data"][0].keys())
+                        
+                        for possible_key in possible_keys:
+                            if possible_key in data_keys:
+                                processed_chart["config"]["xAxisKey"] = possible_key
+                                break
+                        
+                        if not processed_chart["config"].get("xAxisKey"):
+                            # Just use the first key that's not a value
+                            for key in data_keys:
+                                if not isinstance(processed_chart["data"][0][key], (int, float)):
+                                    processed_chart["config"]["xAxisKey"] = key
+                                    break
+            
+            elif chart_type == "pie":
+                # Process pie chart data - ensure name/value structure and calculate total
+                if "data" in processed_chart and processed_chart["data"]:
+                    total_value = 0
+                    
+                    # Ensure each data item has name and value keys
+                    for item in processed_chart["data"]:
+                        # Sometimes pie data comes with 'segment' instead of 'name'
+                        if "segment" in item and "name" not in item:
+                            item["name"] = item["segment"]
+                        
+                        # Calculate total for all values
+                        if "value" in item and isinstance(item["value"], (int, float)):
+                            total_value += item["value"]
+                    
+                    # Add total to config
+                    if "config" in processed_chart:
+                        processed_chart["config"]["totalValue"] = total_value
+                        if not processed_chart["config"].get("totalLabel"):
+                            processed_chart["config"]["totalLabel"] = "Total"
+                
+                # Add default chartConfig with colors if missing
+                if "chartConfig" not in processed_chart or not processed_chart["chartConfig"]:
+                    processed_chart["chartConfig"] = {}
+                    for i, item in enumerate(processed_chart["data"]):
+                        color_index = i % len(CHART_COLORS)
+                        key = item.get("name", f"segment{i}")
+                        processed_chart["chartConfig"][key] = {
+                            "label": key,
+                            "color": CHART_COLORS[color_index]
+                        }
+            
+            elif chart_type in ["bar", "scatter"]:
+                # Ensure basic structure is valid
+                if "chartConfig" not in processed_chart or not processed_chart["chartConfig"]:
+                    processed_chart["chartConfig"] = {}
+                    
+                    # Find all possible data keys that aren't the x-axis key
+                    x_axis_key = processed_chart["config"].get("xAxisKey", "name")
+                    if processed_chart["data"] and len(processed_chart["data"]) > 0:
+                        data_keys = [k for k in processed_chart["data"][0].keys() if k != x_axis_key]
+                        
+                        # Create chartConfig for each data key
+                        for i, key in enumerate(data_keys):
+                            if key not in processed_chart["chartConfig"]:
+                                color_index = i % len(CHART_COLORS)
+                                processed_chart["chartConfig"][key] = {
+                                    "label": key.capitalize(),
+                                    "color": CHART_COLORS[color_index]
+                                }
+            
+            # Return the processed chart data
+            return processed_chart
+            
+        except Exception as e:
+            logger.error(f"Error processing chart data: {e}")
+            return tool_input  # Fall back to the original input if processing fails
+    
+    def _process_table_input(self, tool_input: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Process the raw table input from the tool into a properly formatted table data structure
+        that can be rendered by the frontend.
+        
+        Args:
+            tool_input: The raw input provided to the generate_table_data tool
+            
+        Returns:
+            Processed table data for frontend rendering
+        """
+        # Basic validation
+        if not isinstance(tool_input, dict):
+            logger.warning("Table input is not a dictionary")
+            return None
+            
+        if not all(key in tool_input for key in ["tableType", "config", "data"]):
+            logger.warning("Table input missing required keys")
+            return None
+        
+        # Create a copy to avoid modifying the original
+        processed_table = tool_input.copy()
+        
+        try:
+            # Validate config and columns
+            if "config" in processed_table and "columns" in processed_table["config"]:
+                # Ensure all columns have key and label
+                for column in processed_table["config"]["columns"]:
+                    if "key" not in column:
+                        logger.warning("Column missing 'key' field")
+                        if "label" in column:
+                            # Use label as key if missing
+                            column["key"] = column["label"].lower().replace(" ", "_")
+                    
+                    if "label" not in column:
+                        # Use capitalized key as label if missing
+                        column["label"] = column["key"].capitalize().replace("_", " ")
+                    
+                    # Set default format if not specified
+                    if "format" not in column:
+                        # Try to infer format from data
+                        if processed_table["data"] and len(processed_table["data"]) > 0:
+                            first_row = processed_table["data"][0]
+                            if column["key"] in first_row:
+                                value = first_row[column["key"]]
+                                if isinstance(value, (int, float)):
+                                    # Check if it looks like currency (has $ or is large number)
+                                    if isinstance(value, int) and value > 1000:
+                                        column["format"] = "currency"
+                                    else:
+                                        column["format"] = "number"
+                                else:
+                                    column["format"] = "text"
+                            else:
+                                column["format"] = "text"
+                        else:
+                            column["format"] = "text"
+            
+            # Return the processed table data
+            return processed_table
+            
+        except Exception as e:
+            logger.error(f"Error processing table data: {e}")
+            return tool_input  # Fall back to the original input if processing fails
+
+    # --- Keep other helper methods like _process_claude_response, _convert_claude_citation ---

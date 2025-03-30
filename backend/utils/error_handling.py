@@ -7,10 +7,34 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
+import os
 
 from models.error import create_error_response, ValidationErrorDetail
 
 logger = logging.getLogger(__name__)
+
+# Get allowed origins from environment
+def get_allowed_origins():
+    return os.getenv(
+        "ALLOWED_ORIGINS", 
+        "http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:3002,http://127.0.0.1:3003"
+    ).split(",")
+
+# Add CORS headers to any response
+def add_cors_headers(response: JSONResponse) -> JSONResponse:
+    origins = get_allowed_origins()
+    
+    # If the response already has CORS headers, don't modify it
+    if "access-control-allow-origin" in response.headers:
+        return response
+    
+    # Add CORS headers - use the first origin as default, or * if no origins are defined
+    response.headers["Access-Control-Allow-Origin"] = origins[0] if origins else "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    
+    return response
 
 
 def format_validation_errors(errors: List[Dict[str, Any]]) -> List[ValidationErrorDetail]:
@@ -73,11 +97,15 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     if exc.status_code != 404:
         logger.error(f"HTTPException: {exc.status_code} - {exc.detail}")
     
-    return JSONResponse(
+    # Create the response
+    response = JSONResponse(
         status_code=exc.status_code,
         content=content,
-        headers=exc.headers
+        headers=exc.headers or {}
     )
+    
+    # Add CORS headers
+    return add_cors_headers(response)
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -103,10 +131,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     
     logger.error(f"Validation error: {errors}")
     
-    return JSONResponse(
+    # Create response
+    response = JSONResponse(
         status_code=422,
         content=content
     )
+    
+    # Add CORS headers
+    return add_cors_headers(response)
 
 
 def get_error_type_from_status(status_code: int) -> str:

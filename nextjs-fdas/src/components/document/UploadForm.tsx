@@ -28,6 +28,8 @@ export function UploadForm({ onUploadSuccess, onUploadError, sessionId }: Upload
   // Handle file selection from input
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
+    console.log("File selected:", selectedFile?.name);
+    
     if (selectedFile) {
       validateAndSetFile(selectedFile);
     }
@@ -35,23 +37,28 @@ export function UploadForm({ onUploadSuccess, onUploadError, sessionId }: Upload
   
   // Validate file and set it if valid
   const validateAndSetFile = (selectedFile: File) => {
+    console.log("Validating file:", selectedFile.name);
+    
     // Reset states
     setError(null);
     setWarning(null);
+    setIsUploading(false); // Ensure we're not showing the loading state
     
     // Check file type
     if (selectedFile.type !== 'application/pdf') {
+      console.error("Invalid file type:", selectedFile.type);
       setError('Only PDF files are supported');
       return false;
     }
     
     // Check file size (10MB limit)
     if (selectedFile.size > 10 * 1024 * 1024) {
+      console.error("File too large:", selectedFile.size);
       setError('File size must be less than 10MB');
       return false;
     }
     
-    // Optional additional checks for PDF content validity could go here
+    console.log("File validation successful");
     
     // Set the file if validation passes
     setFile(selectedFile);
@@ -164,7 +171,7 @@ export function UploadForm({ onUploadSuccess, onUploadError, sessionId }: Upload
       });
       
       // Get the API base URL from environment or use default
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
       
       // Open and send the request
       xhr.open('POST', `${API_BASE_URL}/api/documents/upload`);
@@ -307,6 +314,7 @@ export function UploadForm({ onUploadSuccess, onUploadError, sessionId }: Upload
                 onChange={handleFileChange} 
                 disabled={isUploading}
                 className="hidden"
+                key={`file-input-${isUploading ? 'uploading' : 'idle'}`}
               />
             </label>
           </>
@@ -340,12 +348,14 @@ export function UploadForm({ onUploadSuccess, onUploadError, sessionId }: Upload
             ) : (
               <div className="flex space-x-2">
                 <button
+                  type="button"
                   onClick={cancelUpload}
                   className="flex-1 border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 text-sm px-4 py-2"
                 >
                   Cancel
                 </button>
                 <button 
+                  type="button"
                   onClick={handleUpload}
                   disabled={isUploading}
                   className="flex-1 bg-blue-500 text-white hover:bg-blue-600 rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none text-sm px-4 py-2 flex items-center justify-center"

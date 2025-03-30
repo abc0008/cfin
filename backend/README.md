@@ -1,12 +1,14 @@
 # FDAS (Financial Document Analysis System) Backend
 
-This is the backend server for the Financial Document Analysis System, providing API endpoints for document upload, processing, and analysis using Claude API, LangChain, and LangGraph.
+This is the backend server for the Financial Document Analysis System, providing API endpoints for document upload, processing, and analysis using Claude API's native PDF capabilities, LangChain, and LangGraph.
 
 ## Features
 
-- PDF document upload and processing
-- Financial data extraction with Claude API
-- Citation extraction and linking
+- Direct PDF document processing via Claude API (no preprocessing required)
+- Native citation extraction and linking
+- Automatic financial data recognition and extraction
+- Support for complex financial document structures
+- Fallback OCR processing (only if needed)
 - Conversation management with document context
 - Financial analysis and visualization
 
@@ -15,7 +17,7 @@ This is the backend server for the Financial Document Analysis System, providing
 - Python 3.9+
 - FastAPI
 - SQLAlchemy
-- Anthropic Claude API access
+- Anthropic Claude API access (claude-3-sonnet-latest or higher)
 - LangChain and LangGraph
 
 ## Setup

@@ -133,16 +133,16 @@ export const HighlightedTerm: React.FC<HighlightedTermProps> = ({ children, term
   
   return (
     <span 
-      className="relative text-blue-600 border-b border-dotted border-blue-400 cursor-help"
+      className="relative inline-block text-blue-600 border-b border-dotted border-blue-400 cursor-help"
       onMouseEnter={() => setShowTooltip(true)}
       onMouseLeave={() => setShowTooltip(false)}
     >
-      {children}
+      <span>{children}</span>
       {showTooltip && (
-        <div className="absolute bottom-full left-0 mb-2 p-2 bg-white border border-gray-200 rounded shadow-lg z-10 max-w-xs">
-          <h5 className="font-medium text-blue-700">{term.term}</h5>
-          <p className="text-xs text-gray-700 mt-1">{term.explanation}</p>
-        </div>
+        <span className="absolute bottom-full left-0 mb-2 p-2 bg-white border border-gray-200 rounded shadow-lg z-10 max-w-xs block">
+          <span className="font-medium text-blue-700 block">{term.term}</span>
+          <span className="text-xs text-gray-700 mt-1 block">{term.explanation}</span>
+        </span>
       )}
     </span>
   );

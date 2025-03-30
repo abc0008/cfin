@@ -75,40 +75,44 @@ export const cleanupBlobUrls = () => {
 
 export const documentsApi = {
   /**
-   * Uploads a document to the server
+   * Upload a document to the server
    */
   async uploadDocument(file: File): Promise<ProcessedDocument> {
     try {
+      console.log(`API Client - uploadDocument: Starting upload for file ${file.name}`);
+      
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append("file", file);
       
       // Type assertion to resolve schema compatibility issue
       const data = await apiService.postFormData<DocumentUploadResponse>(
-        '/api/documents/upload',
+        `/api/documents/upload`,
         formData,
         DocumentUploadResponseSchema as any
       );
+      
+      console.log(`API Client - uploadDocument: Upload successful, document ID: ${data.document_id}`);
       
       // For now, return a placeholder ProcessedDocument until re-processing is complete
       return {
         metadata: {
           id: data.document_id,
           filename: data.filename,
-          uploadTimestamp: new Date().toISOString(),
-          fileSize: file.size,
-          mimeType: file.type,
-          userId: 'current-user', // Would come from auth in a real app
+          upload_timestamp: data.upload_timestamp,
+          file_size: data.file_size,
+          mime_type: data.mime_type,
+          user_id: data.user_id,
+          processing_status: data.status || 'processing'
         },
-        contentType: 'other',
-        extractionTimestamp: new Date().toISOString(),
-        periods: [],
-        extractedData: {},
-        confidenceScore: 0,
-        processingStatus: data.status,
-        errorMessage: data.status === 'failed' ? data.message : undefined,
+        content_type: data.content_type || 'unknown',
+        extractedData: data.extracted_data || {},
+        processingStatus: data.status || 'processing',
+        filename: data.filename
       };
+      
     } catch (error) {
-      throw handleApiError(error);
+      console.error('API Client - uploadDocument: Upload failed', error);
+      throw error;
     }
   },
   

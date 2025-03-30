@@ -21,9 +21,9 @@ export function MessageRenderer({ message, onCitationClick }: MessageRendererPro
     return (
       <div className="message-content">
         {message.content.split('\n').map((line, i) => (
-          <p key={i} className={i > 0 ? 'mt-2' : ''}>
+          <div key={i} className={i > 0 ? 'mt-2' : ''}>
             {line}
-          </p>
+          </div>
         ))}
       </div>
     );
@@ -34,9 +34,9 @@ export function MessageRenderer({ message, onCitationClick }: MessageRendererPro
     return (
       <div className="message-content">
         {message.content.split('\n').map((line, i) => (
-          <p key={i} className={i > 0 ? 'mt-2' : ''}>
+          <div key={i} className={i > 0 ? 'mt-2' : ''}>
             {line}
-          </p>
+          </div>
         ))}
       </div>
     );

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import update, delete, func
 import json
+import os
 
 from models.database_models import Document, Citation, User, DocumentType, ProcessingStatusEnum
 from models.document import ProcessedDocument, DocumentMetadata, DocumentUploadResponse, Citation as CitationSchema
@@ -79,10 +80,23 @@ class DocumentRepository:
         Returns:
             Document if found, None otherwise
         """
-        result = await self.db.execute(
-            select(Document).where(Document.id == document_id)
-        )
-        return result.scalars().first()
+        # Ensure document_id is a string, not a list
+        if isinstance(document_id, list):
+            # If it's a list with items, use the first one
+            if document_id:
+                document_id = document_id[0]
+            else:
+                logger.error("Empty document_id list provided to get_document")
+                return None
+                
+        try:
+            result = await self.db.execute(
+                select(Document).where(Document.id == document_id)
+            )
+            return result.scalars().first()
+        except Exception as e:
+            logger.error(f"Error retrieving document {document_id}: {str(e)}")
+            return None
     
     async def get_document_content(self, document_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -535,3 +549,35 @@ class DocumentRepository:
         # The storage service uses the document ID with a .pdf extension as the file ID
         file_id = f"{document_id}.pdf"
         return self.storage_service.get_file_path(file_id)
+    
+    async def get_document_binary(self, document_id: str) -> Optional[bytes]:
+        """
+        Get the binary data for a document.
+        
+        Args:
+            document_id: ID of the document
+            
+        Returns:
+            Binary data of the document file if available, None otherwise
+        """
+        try:
+            # First check if we have the document in the database
+            document = await self.get_document(document_id)
+            if not document:
+                return None
+            
+            # If we have binary_data stored in the database, return it
+            if hasattr(document, 'binary_data') and document.binary_data:
+                return document.binary_data
+            
+            # If we don't have binary data in the DB, try to read from file
+            file_path = self.get_document_file_path(document_id)
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    return f.read()
+            
+            # No binary data found
+            return None
+        except Exception as e:
+            logging.error(f"Error getting document binary data: {str(e)}", exc_info=True)
+            return None

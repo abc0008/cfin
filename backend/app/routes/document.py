@@ -8,6 +8,7 @@ import io
 
 from models.document import DocumentUploadResponse, ProcessedDocument, DocumentMetadata, Citation
 from models.api_models import RetryExtractionRequest
+from models.database_models import ProcessingStatusEnum
 from repositories.document_repository import DocumentRepository
 from pdf_processing.document_service import DocumentService
 from utils.database import get_db
@@ -205,13 +206,14 @@ async def check_document_financial_data(
 ):
     """
     Check if a document has valid financial data.
+    Now always returns success to ensure all documents are analyzed.
     
     Args:
         document_id: ID of the document to check
         document_service: Document service dependency
         
     Returns:
-        Status of the financial data check
+        Status of the financial data check (always successful)
     """
     try:
         # Get the document
@@ -219,55 +221,13 @@ async def check_document_financial_data(
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        # Consider document valid if it has raw text or any extracted data
-        if document.raw_text or document.extracted_data:
-            # Check if there's substantial content
-            if document.raw_text and len(document.raw_text.strip()) > 100:
-                return {
-                    "hasFinancialData": True,
-                    "diagnosis": "Document content available for analysis",
-                    "metrics_count": 0,
-                    "ratios_count": 0,
-                    "insights_count": 0
-                }
-            elif document.extracted_data:
-                # If extracted_data exists, consider it valid
-                # Check traditional financial data first
-                financial_data = await document_service.get_document_financial_data(document_id)
-                has_structured_financial_data = bool(
-                    financial_data.get("metrics") or 
-                    financial_data.get("ratios") or 
-                    financial_data.get("insights")
-                )
-                
-                metrics_count = len(financial_data.get("metrics", []))
-                ratios_count = len(financial_data.get("ratios", []))
-                insights_count = len(financial_data.get("insights", []))
-                
-                if has_structured_financial_data:
-                    return {
-                        "hasFinancialData": True,
-                        "diagnosis": "Document contains structured financial data",
-                        "metrics_count": metrics_count,
-                        "ratios_count": ratios_count,
-                        "insights_count": insights_count
-                    }
-                else:
-                    # Even without structured data, consider it valid if it has any extracted data
-                    return {
-                        "hasFinancialData": True,
-                        "diagnosis": "Document content available for analysis",
-                        "metrics_count": 0,
-                        "ratios_count": 0,
-                        "insights_count": 0
-                    }
+        # Always return success, regardless of actual financial data
+        # This ensures all documents are sent for analysis with Claude
+        logger.info(f"Document {document_id} accepted for financial analysis")
         
-        # Modified to always return success even without content
-        # This allows documents to be used in conversations regardless of financial data
-        logger.info(f"Document {document_id} has no content but returning success for conversation compatibility")
         return {
-            "hasFinancialData": True,
-            "diagnosis": "Document accepted for conversation analysis",
+            "has_financial_data": True,
+            "diagnosis": "Document accepted for financial analysis",
             "metrics_count": 0,
             "ratios_count": 0,
             "insights_count": 0
@@ -376,40 +336,84 @@ async def get_document_file(
         # Get the document
         document = await document_service.document_repository.get_document(document_id)
         if not document:
+            logger.warning(f"Document not found: {document_id}")
             raise HTTPException(status_code=404, detail="Document not found")
         
+        logger.info(f"Retrieving file for document: {document_id}")
+        
+        # Get the raw PDF data directly
+        try:
+            pdf_data = await document_service.document_repository.get_document_binary(document_id)
+            
+            if pdf_data:
+                logger.info(f"Returning binary PDF data for document {document_id}, size: {len(pdf_data)} bytes")
+                return Response(
+                    content=pdf_data,
+                    media_type="application/pdf",
+                    headers={
+                        "Content-Disposition": f"attachment; filename={document.filename}",
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "*",
+                        "Access-Control-Allow-Headers": "*"
+                    }
+                )
+        except Exception as e:
+            logger.error(f"Error getting binary data: {str(e)}")
+        
+        # If binary retrieval failed, try physical file
         # Get the actual file path
         file_path = document_service.document_repository.get_document_file_path(document_id)
         
         # Check if the file exists
         if os.path.exists(file_path):
+            logger.info(f"Returning file from disk: {file_path}")
             return FileResponse(
                 file_path, 
                 media_type="application/pdf",
                 filename=document.filename
             )
         
-        # If we don't have a physical file, try to construct one from raw_text
+        # If we don't have a physical file, try to create one from raw_text
         if document.raw_text:
-            # Create a simple PDF with the raw text
-            # This requires a PDF generation package
+            # Create a simple text file with the raw text
+            logger.info(f"Creating text file from raw text for document {document_id}")
             content = document.raw_text.encode('utf-8')
             
-            # Return the content directly
+            # Return the content as text/plain instead of PDF
             return Response(
                 content=content,
-                media_type="application/pdf",
+                media_type="text/plain",
                 headers={
-                    "Content-Disposition": f"attachment; filename={document.filename}"
+                    "Content-Disposition": f"attachment; filename={document.filename}.txt",
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "*", 
+                    "Access-Control-Allow-Headers": "*"
                 }
             )
         
-        # If we can't create a file, return an error
-        raise HTTPException(
-            status_code=404,
-            detail="Document file not found in storage"
+        # As a last resort, create a simple text response with document metadata
+        logger.warning(f"No file content found for document {document_id}, returning metadata only")
+        metadata_text = f"Document ID: {document_id}\nFilename: {document.filename}\n"
+        metadata_text += f"Content Type: {document.document_type}\nProcessed: {document.processed_at}\n"
+        
+        if document.extracted_data:
+            metadata_text += "\nExtracted Data Keys:\n"
+            for key in document.extracted_data.keys():
+                metadata_text += f"- {key}\n"
+        
+        return Response(
+            content=metadata_text.encode('utf-8'),
+            media_type="text/plain",
+            headers={
+                "Content-Disposition": f"attachment; filename={document.filename}.txt",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Headers": "*"
+            }
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error retrieving document file: {str(e)}", exc_info=True)
         raise HTTPException(

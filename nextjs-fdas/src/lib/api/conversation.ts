@@ -114,8 +114,8 @@ class ConversationApiService {
       // Validate request data against schema
       const validatedData = validateRequest(ConversationCreateRequestSchema, {
         title,
-        document_ids: documentIds,
-        user_id: 'default-user' // This is handled by the backend, but we'll include it for completeness
+        documentIds: documentIds,
+        userId: 'default-user' // This is handled by the backend, but we'll include it for completeness
       });
       
       const response = await this.request<{ session_id: string }>(
@@ -152,19 +152,23 @@ class ConversationApiService {
    * Send a message to the conversation
    */
   async sendMessage(sessionId: string, message: string, documentIds: string[] = []): Promise<Message> {
+    if (!sessionId) {
+      throw new Error('Session ID is required');
+    }
+
     try {
-      // Validate request data against schema
-      const validatedData = validateRequest(MessageRequestSchema, {
-        session_id: sessionId,
+      // Format the request body to match the backend's expected format
+      const requestBody = {
+        session_id: sessionId,  // Use snake_case for backend compatibility
         content: message,
-        document_ids: documentIds,
-        user_id: 'default-user'
-      });
+        document_ids: documentIds,  // Use snake_case for backend compatibility
+        user_id: 'default-user'  // Use snake_case for backend compatibility
+      };
       
       const response = await this.request<Message>(
         `/conversation/${sessionId}/message`,
         'POST',
-        validatedData
+        requestBody
       );
       
       return response;
