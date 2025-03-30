@@ -29,3 +29,23 @@ dist-ssr
 .env.local
 .env.development
 .env.production
+
+# NextJS specific
+.next/cache/
+.next/*.log
+.vercel
+.turbo
+next-env.d.ts
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+.venv
+env/
+venv/
+ENV/
+*.so
+build/
+*.egg-info/
+.pytest_cache/
