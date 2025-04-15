@@ -49,3 +49,11 @@ ENV/
 build/
 *.egg-info/
 .pytest_cache/
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+# PDF Uploads
+backend/uploads/*.pdf
+# Virtual Environments
+venv_cfin/
