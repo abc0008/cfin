@@ -1,9 +1,15 @@
 import os
+import sqlite3
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base
+
+# Import sqlite3 error classes for aiosqlite
+import aiosqlite
+aiosqlite.DatabaseError = sqlite3.DatabaseError
+aiosqlite.Error = sqlite3.Error
 
 # Get the database URL from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fdas.db")

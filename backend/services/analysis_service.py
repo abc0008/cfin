@@ -235,11 +235,42 @@ class AnalysisService:
                 "query": parameters.get("query", "")
             }
 
+            # ---> ADD DETAILED LOGGING HERE <---
+            logger.info(f"Constructed response_payload for analysis {analysis_response_id}:")
+            logger.info(f"Payload keys: {list(response_payload.keys())}")
+            try:
+                logger.info(f"  - id type: {type(response_payload.get('id'))}")
+                logger.info(f"  - documentIds type: {type(response_payload.get('documentIds'))}")
+                logger.info(f"  - timestamp type: {type(response_payload.get('timestamp'))}")
+                viz_data = response_payload.get('visualizationData')
+                logger.info(f"  - visualizationData type: {type(viz_data)}")
+                if isinstance(viz_data, dict):
+                    logger.info(f"    - charts type: {type(viz_data.get('charts'))}")
+                    logger.info(f"    - tables type: {type(viz_data.get('tables'))}")
+                    # Log type of first chart/table if they exist
+                    if isinstance(viz_data.get('charts'), list) and viz_data.get('charts'):
+                        logger.info(f"      - First chart type: {type(viz_data['charts'][0])}")
+                    if isinstance(viz_data.get('tables'), list) and viz_data.get('tables'):
+                        logger.info(f"      - First table type: {type(viz_data['tables'][0])}")
+                metrics_data = response_payload.get('metrics')
+                logger.info(f"  - metrics type: {type(metrics_data)}")
+                if isinstance(metrics_data, list) and metrics_data:
+                    logger.info(f"    - first metric type: {type(metrics_data[0])}")
+                # Add logging for other potentially complex fields
+                logger.info(f"  - ratios type: {type(response_payload.get('ratios'))}")
+                logger.info(f"  - comparativePeriods type: {type(response_payload.get('comparativePeriods'))}")
+                logger.info(f"  - insights type: {type(response_payload.get('insights'))}")
+                logger.info(f"  - citationReferences type: {type(response_payload.get('citationReferences'))}")
+            except Exception as log_e:
+                logger.error(f"Error during detailed logging of response_payload: {log_e}")
+            # <--- END DETAILED LOGGING --->
+
             return analysis_response_id, response_payload
 
         except Exception as e:
             logger.error(f"Error running analysis for document {document_id}: {str(e)}", exc_info=True)
-            raise # Re-raise the exception to be handled by the API layer
+            # Re-raise the exception to be handled by the API layer
+            raise
 
     async def _run_tool_based_comprehensive_analysis(
         self,

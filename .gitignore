@@ -31,7 +31,7 @@ dist-ssr
 .env.production
 
 # NextJS specific
-.next/cache/
+.next/
 .next/*.log
 .vercel
 .turbo
